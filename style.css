@@ -1,0 +1,46 @@
+details{margin-top:10px}summary{cursor:pointer;color:#ddd}#spacingSettings{border-top:1px solid #333;margin-top:12px;padding-top:6px}#alignmentStep>button,#add{width:100%;margin-top:5px}#heightLegend{margin-left:8px}header label{white-space:nowrap}h3{font-size:11px} :root{color-scheme:dark;font:12px system-ui,sans-serif;color:#fff;background:#000;--pink:#ff0088}*{box-sizing:border-box}body{margin:0;height:100vh;display:flex;flex-direction:column}header{min-height:50px;flex-wrap:wrap;display:flex;gap:7px;align-items:center;padding:8px 12px;border-bottom:1px solid #444}strong{letter-spacing:2px;margin-right:12px}strong span{color:var(--pink)}button,input,select{font:inherit;color:#fff;background:#111;border:1px solid #777;border-radius:3px;padding:6px 8px}button{cursor:pointer}button:hover,button:focus-visible{border-color:var(--pink)}button:disabled{opacity:.4;cursor:default}.accent{border-color:var(--pink)}input[type=checkbox]{accent-color:var(--pink);vertical-align:middle}input[type=range]{accent-color:var(--pink);width:100%;padding:0}input[type=number]{width:86px}input:invalid{border-color:#ff6464}main{display:flex;flex:1;min-height:0}aside{width:310px;flex-shrink:0;overflow:auto;padding:12px;border-right:1px solid #444}h2{font-size:12px;text-transform:uppercase;letter-spacing:.7px;margin:0 0 10px}h2 span{color:var(--pink);float:right}section{border-top:1px solid #333;margin-top:14px;padding-top:14px}.hint{font-size:11px;line-height:1.5;color:#aaa;margin:8px 0}.field{display:flex;align-items:center;gap:6px;justify-content:space-between;margin:7px 0}.field button{font-size:10px;width:67px}.field label{flex:1}.block{display:block;margin-top:8px}.card{border:1px solid #666;border-radius:3px;margin-bottom:7px;padding:9px;cursor:pointer;background:#0b0b0b}.card.selected{border-color:var(--pink);box-shadow:inset 3px 0 var(--pink)}.cardName{overflow-wrap:anywhere;font-size:11px}.cardName b{color:var(--pink);font-size:14px;margin-right:6px}.card small{display:block;color:#aaa;margin:5px 0}.cardControls{display:flex;justify-content:flex-end;gap:5px}.cardControls button{padding:2px 7px}.cardControls .remove{margin-right:auto}#stage{position:relative;flex:1;min-width:0;background:#050505}canvas{width:100%;height:100%;display:block;touch-action:none}#empty{position:absolute;top:45%;width:100%;text-align:center;pointer-events:none;color:#aaa;line-height:2}#empty[hidden]{display:none}#viewHint{position:absolute;bottom:12px;left:14px;background:#111c;padding:5px 8px;pointer-events:none;color:#aaa;font-size:10px}#scale{margin-left:12px}footer{min-height:31px;border-top:1px solid #444;padding:7px 12px;font-size:11px;display:flex;gap:15px}#error{color:#ff75bb}#status{color:#bbb}.spacer{flex:1}dialog{background:#090909;border:1px solid #fff;border-radius:5px;width:min(860px,94vw);padding:20px}dialog::backdrop{background:#000b}.toolbar{display:flex;align-items:center;gap:8px;margin:12px 0}#folderPath{flex:1;min-width:0}#folderEntries{max-height:55vh;overflow:auto}.folderRow{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #333}.folderRow label{flex:1;overflow-wrap:anywhere}.folderRow small{display:block;color:#aaa}.join{padding:9px 0;border-top:1px solid #333}.join h3{font-size:11px;color:var(--pink)}.fitinfo{font-size:10px;color:#aaa;line-height:1.6;margin:8px 0}@media(max-width:850px){aside{width:260px}header{gap:4px;padding:6px}strong{font-size:10px;margin-right:2px;letter-spacing:0}button{padding:5px}#mode{max-width:115px}}
+
+/* Keep the primary three steps visible at normal laptop viewport sizes. */
+aside{width:320px;padding:12px}#loadStep{border:0;margin:0;padding:0}section{margin-top:12px;padding-top:12px}h2{margin-bottom:7px}.hint{line-height:1.35;margin:6px 0}#slices{margin-top:8px;max-height:215px;overflow:auto}.card{position:relative;padding:5px 8px;margin-bottom:5px}.cardName{padding-right:56px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.card small{margin:2px 0;font-size:10px}.cardControls{position:absolute;right:5px;top:7px}.cardControls .remove{display:none}.card.selected .cardControls .remove{display:block;position:absolute;right:0;top:25px;font-size:9px;padding:0 3px}#inspector{border:0;margin:0;padding:0}#prepareBackground{width:100%}#spacingSettings{padding:0;border:0;margin-top:8px}#alignmentStep>button{margin-top:10px}summary{font-size:11px}#joints .join{border:0;padding:0}#joints h3{display:none}#jointSection .field{margin:5px 0}footer{flex-wrap:wrap}button.accent{background:#250014}header label{font-size:11px}#orientation{margin-top:6px}#alignmentStatus{color:#ddd}
+.fitRow{display:flex;gap:12px;margin:8px 0}.fitRow label{display:flex;align-items:center;gap:6px}.fitRow input{width:68px}#jointSection .hint{max-width:275px}
+
+/* Joint refinements: explicit targets, native typing and keyboard retained. */
+#jointSection .jointField{display:grid;grid-template-columns:minmax(65px,1fr) 36px 86px 36px;gap:6px}
+#jointSection .jointStep{width:36px;height:36px;padding:0;font-size:21px;border-color:#fff}
+#jointSection .jointStep:hover,#jointSection .jointStep:focus-visible{border-color:var(--pink);outline:1px solid var(--pink)}
+#jointSection input[type=number]{height:36px;appearance:textfield;-moz-appearance:textfield}
+#jointSection input::-webkit-inner-spin-button,#jointSection input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+#jointSelect{min-height:36px;min-width:158px;border-color:#fff}
+#jointSelect:focus-visible,#jointSection input:focus-visible{outline:1px solid var(--pink);border-color:var(--pink)}
+
+/* Keyboard equivalent of the concise native hover descriptions. */
+#focusHelp{position:fixed;z-index:1000;width:min(360px,calc(100vw - 16px));padding:10px 12px;border:1px solid #999;border-radius:3px;background:#171717;color:#fff;font-size:12px;line-height:1.45;pointer-events:none;box-shadow:0 3px 12px #0009}
+#focusHelp[hidden]{display:none}
+
+/* Overlay checkboxes must not inherit numeric fit-field widths. */
+.fitRow input[type=checkbox]{width:auto;flex:none}.fitRow label:has(input[type=checkbox]){white-space:nowrap}
+
+/* Explicit numerical targets; keep typed values and existing event ownership. */
+.numericEditor{display:inline-flex;gap:4px;align-items:center;flex-shrink:0}
+.numericEditor input[type=number]{width:62px;min-width:0;height:36px;padding:5px;appearance:textfield;-moz-appearance:textfield}
+.numericEditor input::-webkit-inner-spin-button,.numericEditor input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.numericEditor .numericStep{width:36px;min-width:36px;height:36px;padding:0;font-size:21px;border-color:#aaa}
+.fitRow:has(.numericEditor){gap:8px;justify-content:space-between}
+.fitRow .numericField{display:flex;flex-direction:column;align-items:flex-start;gap:4px}
+.fitRow .numericEditor input[type=number]{width:60px}
+summary{min-height:28px;padding:5px 0}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #ff0088;outline-offset:2px}
+label:has(input[type=checkbox]){min-height:24px;align-content:center}
+#computeStem,#computeCandidates,#computeBorders,#merge{width:100%;min-height:36px;margin-top:6px}
+#exportStep input,#exportStep button{width:100%;min-height:36px}
+#exportStep button{margin:6px 0 10px;border-color:#fff}
+.exportName{display:block;margin:10px 0 5px;color:#ddd}
+#exportStatus{color:#fff;overflow-wrap:anywhere}
+#leafBase{min-height:36px}
+#align{width:100%;min-height:36px}#jointSection{margin-top:10px}#resetSliceCurve{font-size:11px}#stemStep .fitRow:has(button){flex-wrap:wrap;gap:5px}#stemStep .fitRow button{min-height:30px;font-size:11px;padding:4px 6px}
+#exportStep input[type=checkbox]{width:auto;min-height:0}#stemPlot{position:absolute;right:20px;bottom:34px;width:min(540px,90%);height:340px;min-width:340px;min-height:230px;max-width:100%;max-height:95%;resize:both;overflow:hidden;z-index:10;background:#090909;border:1px solid #888;border-radius:3px;padding:0;margin:0;display:flex;flex-direction:column;box-shadow:0 4px 18px #000a}#stemPlot[hidden]{display:none}#plotTitle{display:flex;align-items:center;justify-content:space-between;cursor:move;touch-action:none;padding:5px 8px;background:#181818;border-bottom:1px solid #555;flex:none;min-height:35px}#plotTitle strong{letter-spacing:.3px;font-size:12px}#plotClose{width:28px;height:28px;padding:0;font-size:20px}.plotToolbar{display:flex;align-items:center;gap:9px;padding:5px 8px;flex:none}.plotToolbar label{white-space:nowrap;font-size:11px}#plotStatus{font-size:10px;color:#bbb;overflow:hidden}#plotCanvas{display:block;position:relative;flex:1;min-height:0;width:100%;height:0;touch-action:none}#plotHover{padding:3px 7px;font-size:10px;min-height:29px;color:#ccc;flex:none}
+
+
+/* Hidden editing controls must not be restored by flex layout rules. */
+[hidden]{display:none!important}
+#stemPlot{min-width:440px}#plotHover{color:#fff;font-size:12px}

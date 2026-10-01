@@ -1,0 +1,52 @@
+name: synthetic verification
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked tools and dependencies
+        run: |
+          python -m pip install uv==0.11.21
+          uv sync --frozen
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Numerical and model tests
+        run: |
+          uv run --frozen python -m unittest discover -v
+          npm test
+      - name: Generate synthetic files outside checkout
+        run: uv run --frozen python tests/make_synthetic.py "$RUNNER_TEMP/scans"
+      - name: Build and run Compose
+        env:
+          SEAGRASS_PORT: '8000'
+        run: |
+          export SEAGRASS_DATA_ROOT="$RUNNER_TEMP/scans"
+          docker compose -p seagrass-ci up --build -d --wait --wait-timeout 90
+      - name: Real browser workflow and downloads
+        env:
+          STITCHER_URL: http://127.0.0.1:8000
+          SMALL_FIXTURE: '1'
+        run: |
+          export TEST_OUTPUT="$RUNNER_TEMP/evidence"
+          npm run test:browser
+          chmod -R a+rX "$TEST_OUTPUT"
+          docker run --rm --network none --read-only \
+            --volumes-from seagrass-ci-seagrass-1:ro \
+            -v "$TEST_OUTPUT:/evidence:ro" \
+            -v "$PWD/tests/verify_downloads.py:/app/verify_downloads.py:ro" \
+            seagrass-tools:local python verify_downloads.py /evidence
+      - name: Stop only test resources
+        if: always()
+        run: |
+          export SEAGRASS_DATA_ROOT="$RUNNER_TEMP/scans"
+          docker compose -p seagrass-ci down --volumes

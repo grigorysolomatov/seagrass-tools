@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
+test('separate odd Median and Detection controls default 101/21',()=>{const html=fs.readFileSync(new URL('./index.html',import.meta.url),'utf8');assert.match(html,/Detection window px/);assert.match(html,/id="peakWindow"[^>]*min="1"[^>]*step="2"[^>]*value="21"/);assert.match(html,/id="medianWindow"[^>]*value="101"/);});

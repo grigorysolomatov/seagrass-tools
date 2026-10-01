@@ -1,0 +1,14 @@
+.env
+.venv/
+.cache/
+__pycache__/
+*.pyc
+node_modules/
+test-results/
+*.npz
+*.npy
+*.tmd
+*.png
+*.jpg
+*.csv
+*.log

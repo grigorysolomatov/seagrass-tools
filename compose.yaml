@@ -1,0 +1,24 @@
+services:
+  seagrass:
+    build: .
+    image: seagrass-tools:local
+    ports:
+      - "127.0.0.1:${SEAGRASS_PORT:-8000}:8000"
+    volumes:
+      - type: bind
+        source: ${SEAGRASS_DATA_ROOT:?Set SEAGRASS_DATA_ROOT to your scan directory}
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: volume
+        source: cache
+        target: /cache
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+volumes:
+  cache:

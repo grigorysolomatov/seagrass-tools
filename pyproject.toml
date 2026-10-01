@@ -1,0 +1,5 @@
+[project]
+name = "seagrass-stitcher"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = ["numpy", "scipy", "scikit-image", "pillow", "pyyaml", "opencv-python-headless"]
