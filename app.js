@@ -83,6 +83,7 @@ function renderSide(){
  for(const k of ['mirrorH','mirrorV'])$(k).onchange=e=>edit(st=>orient(st,st.slices.findIndex(s=>s.id===selected),{[k]:e.target.checked}));
  $('reverse').onchange=e=>edit(st=>{st.slices.find(s=>s.id===selected).reverse=e.target.checked;});
  }
+$('stemReverse').disabled=!s;$('stemReverse').checked=!!s?.reverse;
  $('jointSection').hidden=!state.aligned||!state.joints.length;
  selectedJoint=Math.min(selectedJoint,Math.max(0,state.joints.length-1));
  $('jointSelect').innerHTML=state.joints.map((j,i)=>`<option value="${i}" ${i===selectedJoint?'selected':''}>${i+1} → ${i+2}</option>`).join('');
@@ -213,6 +214,7 @@ $('prepareBackground').onclick=removeBackground;
  $('resetSliceCurve').onclick=()=>edit(st=>{delete st.slices.find(s=>s.id===selected).manualResult;});
 $('source').onchange=e=>{showSource=e.target.checked;draw();};
 for(const [k,min,max,integer] of [['threshold',50,99.99,false],['closing',0,30,true],['core',1,40,true],['halo',1,40,true],['iterations',1,20,true]])numeric($('bg-'+k),(st,v)=>{st.background[k]=v;},{scientific:true,min,max,integer});
+$('stemReverse').onchange=e=>{if(!$('curve').checked){$('curve').checked=true;layers.curve=true;}edit(st=>{const s=st.slices.find(s=>s.id===selected);if(s)s.reverse=e.target.checked;});};
 for(const k of ['highlight','curve'])$(k).onchange=e=>{layers[k]=e.target.checked;draw();schedulePreview();};// Read the display selector at render time: no duplicate mode state or fit gate.
 $('mode').oninput=$('mode').onchange=()=>{post.clearPreview();draw();};
 document.addEventListener('keydown',e=>{if(!(e.ctrlKey||e.metaKey)||!['z','y'].includes(e.key.toLowerCase()))return;e.preventDefault();if(e.shiftKey||e.key.toLowerCase()==='y')store.redo();else store.undo();error();refresh();});
