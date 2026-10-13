@@ -1,5 +1,5 @@
 import {Store,addSlices,arrange,reorder,orient,align,editJoint,effective,mul,add} from './model.mjs';
-import {postMerge,installHelp,applyHelp,setHelp} from './post.js';
+import {postMerge,installHelp,applyHelp,setHelp,beginBusy,busyJobs} from './post.js';
 import {photoCompositor} from './blend.mjs';
 import {handlesFor,paintCurve,paintHandles,hitHandle} from './curve_edit.mjs';
 const photoBlend=photoCompositor();
@@ -45,8 +45,8 @@ function status(){
  const s=store.state,ok=ready(),busy=loading||masking||aligning||computingStems||curveBusy;
  const chosen=s.slices.find(s=>s.id===selected),current=chosen&&result(chosen);
  $('computeSliceStems').disabled=busy||!ok;
- $('computeSliceStems').textContent=computingStems?`Computing slice stems · ${jobCount('fit')}`:'Compute slice stems';$('computeSliceStems').classList.toggle('working',computingStems);
- $('sliceStemStatus').textContent=computingStems?`Fitting stems · ${jobCount('fit')} slices done · each curve appears as it finishes.`:!ok?'Remove background first.':!stemsReady()?'Compute automatic stems; placement stays unchanged.':current?.fit.clipped?'Manual handle outside tissue · displayed curve clipped to foreground.':current?.fit.manual?'Manual curve · placement unchanged until Align.':'Current automatic stems · optional handle editing.';
+ $('computeSliceStems').textContent=computingStems?'Computing slice stems…':'Compute slice stems';$('computeSliceStems').classList.toggle('working',computingStems);
+ $('sliceStemStatus').textContent=computingStems?'Each curve appears as it finishes.':!ok?'Remove background first.':!stemsReady()?'Compute automatic stems; placement stays unchanged.':current?.fit.clipped?'Manual handle outside tissue · displayed curve clipped to foreground.':current?.fit.manual?'Manual curve · placement unchanged until Align.':'Current automatic stems · optional handle editing.';
  $('editSliceCurve').disabled=busy||!current||$('mode').value==='merged';
  $('resetSliceCurve').hidden=!$('editSliceCurve').checked;
  $('resetSliceCurve').disabled=busy||!current?.fit.manual;
@@ -62,10 +62,10 @@ function status(){
  $('align').textContent=aligning?'Aligning…':s.aligned?'Align again · reset refinements':'Align leaf ends';
  $('align').classList.toggle('accent',ok&&!s.aligned||stale());
  $('prepareBackground').disabled=busy||!s.slices.length||ok;
- $('prepareBackground').classList.toggle('working',masking);$('prepareBackground').textContent=masking?`Removing background · ${jobCount('mask')}`:ok?'Background removed ✓':'Remove background';
+ $('prepareBackground').classList.toggle('working',masking);$('prepareBackground').textContent=masking?'Removing background…':ok?'Background removed ✓':'Remove background';
  $('prepareBackground').classList.toggle('accent',!ok&&!!s.slices.length);
- $('count').textContent=s.slices.length;
- $('maskStatus').textContent=masking?`Removing background · ${jobCount('mask')} slices done · each cut-out appears as it finishes.`:!s.slices.length?'Load scans first.':ok?'Ready · Inspect the cut-out before Align.':s.background.enabled?'Mask settings changed. Remove background again; placement retained.':'Required before Align.';
+ $('count').textContent=s.slices.length;$('loadStatus').textContent=loading?'Decoding photo + height data…':'';
+ $('maskStatus').textContent=masking?'Each cut-out appears as it finishes.':!s.slices.length?'Load scans first.':ok?'Ready · Inspect the cut-out before Align.':s.background.enabled?'Mask settings changed. Remove background again; placement retained.':'Required before Align.';
  for(const k of ['curve','highlight']){$(k).disabled=!ok||$('mode').value==='merged';setHelp($(k),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'First remove background in step 2.');}
  $('source').disabled=!ok||$('mode').value==='merged';$('source').checked=(!ok&&!masking)||showSource;
  setHelp($('source'),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'Original background is shown until step 2 is complete.');
@@ -133,33 +133,33 @@ function schedulePreview(){} // Explicit Compute owns scientific fitting; visibi
 async function computeSliceStems(){
  if(computingStems||curveBusy||!ready())return;
  store.end();if([...$('alignmentStep').querySelectorAll('input[type=number]:not(:disabled)')].some(e=>!e.validity.valid||e.value==='')){error('Correct stem parameters first.');return;}
- const snapshot=structuredClone(store.state),revision=store.revision;computingStems=true;error();status();
+ const snapshot=structuredClone(store.state),revision=store.revision;computingStems=true;error();status();const job=beginBusy('Computing slice stems',{total:snapshot.slices.length,buttons:['computeSliceStems'],hints:['sliceStemStatus']});
  streamState=snapshot;layers.curve=true;$('curve').checked=true;
- try{const failures=await runSlices('fit',snapshot.slices,s=>prepare(s,snapshot));if(failures.length)throw Error(failures.join(' · '));if(revision!==store.revision)throw Error('Setup changed; compute again.');store.edit(st=>{for(const s of st.slices){s.computedFitKey=fitKey(s,st);delete s.manualResult;}});clearJobs('fit');layers.curve=true;$('curve').checked=true;refresh();}
- catch(e){error('Stem computation failed: '+e.message);}finally{computingStems=false;streamState=null;status();draw();}
+ try{const failures=await runSlices('fit',snapshot.slices,s=>prepare(s,snapshot).finally(()=>job.tick()));if(failures.length)throw Error(failures.join(' · '));if(revision!==store.revision)throw Error('Setup changed; compute again.');store.edit(st=>{for(const s of st.slices){s.computedFitKey=fitKey(s,st);delete s.manualResult;}});clearJobs('fit');layers.curve=true;$('curve').checked=true;refresh();}
+ catch(e){error('Stem computation failed: '+e.message);}finally{job.end();computingStems=false;streamState=null;status();draw();}
 }
 async function removeBackground(){
  if(masking||loading||aligning||!store.state.slices.length)return;
  store.end();if([...$('backgroundStep').querySelectorAll('input')].some(e=>!e.validity.valid||e.value==='')){error('Correct mask parameters before removing background.');return;}
- const snapshot=structuredClone(store.state),revision=store.revision;masking=true;error();status();
+ const snapshot=structuredClone(store.state),revision=store.revision;masking=true;error();status();const job=beginBusy('Removing background',{total:snapshot.slices.length,buttons:['prepareBackground'],hints:['maskStatus']});
  streamState=snapshot;showSource=false;
- try{const failures=await runSlices('mask',snapshot.slices,s=>prepareMask(s,snapshot));if(failures.length)throw Error(failures.join(' · '));
+ try{const failures=await runSlices('mask',snapshot.slices,s=>prepareMask(s,snapshot).finally(()=>job.tick()));if(failures.length)throw Error(failures.join(' · '));
  if(revision!==store.revision){error('Setup changed during preparation. Press Remove background again.');return;}
  store.edit(st=>{st.background.enabled=true;});showSource=false;clearJobs('mask');refresh();
  }catch(e){error('Background removal failed; placement retained. Check mask parameters and retry. '+e.message);}
- finally{masking=false;streamState=null;status();draw();}
+ finally{job.end();masking=false;streamState=null;status();draw();}
 }
 async function doMerge(){
  if(merging||loading||aligning||masking||!ready()||!store.state.aligned)return;
  store.end();if([...document.querySelectorAll('#loadStep input[type=number]:not(:disabled), #backgroundStep input[type=number]:not(:disabled), #alignmentStep input[type=number]:not(:disabled), #jointSection input[type=number]:not(:disabled)')].some(e=>e.value===''||!e.validity.valid)){error('Correct numeric values before Merge.');return;}
  const snapshot=structuredClone(store.state),revision=store.revision;
  const payload={background:parameters(snapshot),slices:snapshot.slices.map(s=>({path:s.path,pose:s.pose,mask_key:masks.get(maskKey(s,snapshot)).key}))};
- merging=true;mergeError='';error();status();
+ merging=true;mergeError='';error();status();const job=beginBusy('Merging raw heights',{buttons:['merge'],hints:['mergeStatus']});
  try{const r=await api('/api/merge',payload);await image(r.asset);
  if(revision!==store.revision){error('Merge discarded: setup changed during computation. Merge again.');return;}
  merged=r;mergeRevision=revision;post.clearPreview();$('mode').value='merged';draw();
  }catch(e){mergeError=e.message;error('Merge failed; slices and last result retained. '+e.message);}
- finally{merging=false;status();}
+ finally{job.end();merging=false;status();}
 }
 async function doAlign(){
  if(aligning||loading||curveBusy||!stemsReady()||store.state.slices.length<2)return;store.end();if([...document.querySelectorAll('#loadStep input[type=number]:not(:disabled), #backgroundStep input[type=number]:not(:disabled), #alignmentStep input[type=number]:not(:disabled), #alignRefineStep input[type=number]:not(:disabled)')].some(e=>e.value===''||!e.validity.valid)){error('Correct invalid numeric values before Align.');return;}
@@ -223,7 +223,7 @@ async function browse(path=folderRoot||''){
  }catch(e){if(generation!==browseGeneration)return;$('folderError').textContent=e.message;if(folderRoot)$('folderPath').value=folderRoot;}
 }
 $('add').onclick=()=>{folderSelection.clear();selectionCount();for(const input of $('folderEntries').querySelectorAll('input'))input.checked=false;$('folders').showModal();browse();};$('folders').onclose=()=>{++browseGeneration;};$('closeFolders').onclick=()=>$('folders').close();$('parent').onclick=()=>browse(folderParent);$('browse').onclick=()=>browse($('folderPath').value);$('folderPath').onfocus=e=>e.target.select();$('folderPath').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();browse(e.target.value);}};
-$('load').onclick=async()=>{if(loading)return;const paths=[...folderSelection.keys()].filter(p=>!store.state.slices.some(s=>s.id===p));if(!paths.length){error('Select at least one new scan folder.');return;}if(paths.length+store.state.slices.length>30){error('Maximum 30 slices.');return;}store.end();const revision=store.revision;loading=true;error();$('folders').close();status();try{const loaded=[];for(const path of paths){const r=await api('/api/load',{path});await Promise.all(Object.values(r.assets).map(image));loaded.push(r);}if(revision!==store.revision){error('Load discarded: setup changed while decoding. Load again.');return;}store.edit(st=>addSlices(st,loaded));refresh();fitView();}catch(e){error('Load failed; existing arrangement retained. '+e.message);}finally{loading=false;status();}};
+$('load').onclick=async()=>{if(loading)return;const paths=[...folderSelection.keys()].filter(p=>!store.state.slices.some(s=>s.id===p));if(!paths.length){error('Select at least one new scan folder.');return;}if(paths.length+store.state.slices.length>30){error('Maximum 30 slices.');return;}store.end();const revision=store.revision;loading=true;error();$('folders').close();status();const job=beginBusy('Loading scans',{total:paths.length,buttons:['add'],hints:['loadStatus']});try{const loaded=[];for(const path of paths){const r=await api('/api/load',{path});await Promise.all(Object.values(r.assets).map(image));loaded.push(r);job.tick();}if(revision!==store.revision){error('Load discarded: setup changed while decoding. Load again.');return;}store.edit(st=>addSlices(st,loaded));refresh();fitView();}catch(e){error('Load failed; existing arrangement retained. '+e.message);}finally{job.end();loading=false;status();}};
 for(const [id,k] of [['sharedTop','top'],['sharedDegree','degree'],['sharedOverlap','overlap']])numeric($(id),(st,v)=>{st.shared[k]=v;},{scientific:k!=='overlap',min:k==='top'?.001:k==='degree'?1:-50,max:k==='top'?100:k==='degree'?8:50,integer:k==='degree'});
 $('merge').onclick=doMerge;
 $('align').onclick=doAlign;$('undo').onclick=()=>{store.undo();error();refresh();};$('redo').onclick=()=>{store.redo();error();refresh();};$('fit').onclick=fitView;
@@ -259,7 +259,7 @@ function sliceAt(clientX,clientY){
 let pointer=null;
 function nativePointer(e,s){const b=canvas.getBoundingClientRect(),x=(e.clientX-b.left-camera.x)/camera.scale-s.pose.shift[0],y=(e.clientY-b.top-camera.y)/camera.scale-s.pose.shift[1],A=s.pose.matrix,d=A[0][0]*A[1][1]-A[0][1]*A[1][0];return [(A[1][1]*x-A[0][1]*y)/d,(-A[1][0]*x+A[0][0]*y)/d];}
 function beginSlice(e){if(curveBusy||!$('editSliceCurve').checked||$('mode').value==='merged')return false;const s=store.state.slices.find(s=>s.id===selected),r=s&&result(s);if(!r)return false;const h=handlesFor(r),b=canvas.getBoundingClientRect(),map=p=>transformed(s,p).map((v,k)=>v*camera.scale+(k?camera.y:camera.x)),index=hitHandle(h,map,[e.clientX-b.left,e.clientY-b.top]);if(index<0)return false;store.end();sliceGesture={id:e.pointerId,slice:structuredClone(s),r,handles:structuredClone(h),index,revision:store.revision,start:nativePointer(e,s),moved:false};canvas.setPointerCapture(e.pointerId);return true;}
-async function finishSlice(e){const g=sliceGesture;sliceGesture=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(!g.moved){draw();return;}curveBusy=true;status();try{const r=await api('/api/curve/edit',{kind:'slice',key:g.r.key,handles:g.handles});if(store.revision!==g.revision)throw Error('Setup changed; manual edit discarded.');store.edit(st=>{st.slices.find(s=>s.id===g.slice.id).manualResult=r;});error();refresh();}catch(e){error(e.message);draw();}finally{curveBusy=false;status();}}
+async function finishSlice(e){const g=sliceGesture;sliceGesture=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(!g.moved){draw();return;}curveBusy=true;status();const job=beginBusy('Checking edited curve',{hints:['sliceStemStatus']});try{const r=await api('/api/curve/edit',{kind:'slice',key:g.r.key,handles:g.handles});if(store.revision!==g.revision)throw Error('Setup changed; manual edit discarded.');store.edit(st=>{st.slices.find(s=>s.id===g.slice.id).manualResult=r;});error();refresh();}catch(e){error(e.message);draw();}finally{job.end();curveBusy=false;status();}}
 canvas.onpointerdown=e=>{if(pointer||sliceGesture||e.button!==0)return;if(beginSlice(e)||post.pointerDown(e,camera))return;pointer={id:e.pointerId,x:e.clientX,y:e.clientY,cameraX:camera.x,cameraY:camera.y,dragging:false};canvas.setPointerCapture(e.pointerId);};
 canvas.onpointermove=e=>{if(sliceGesture){const g=sliceGesture,p=nativePointer(e,g.slice),h=handlesFor(g.r)[g.index];g.handles[g.index]=h.map((v,k)=>v+p[k]-g.start[k]);g.moved=true;draw();return;}if(post.pointerMove(e,camera))return;if(!pointer||e.pointerId!==pointer.id)return;const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;if(Math.hypot(dx,dy)>4)pointer.dragging=true;if(pointer.dragging){camera.x=pointer.cameraX+dx;camera.y=pointer.cameraY+dy;draw();}};
 canvas.onpointerup=e=>{if(sliceGesture){finishSlice(e);return;}if(post.pointerUp(e,camera))return;if(!pointer||e.pointerId!==pointer.id)return;const click=!pointer.dragging&&Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)<=4;pointer=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(click){const id=sliceAt(e.clientX,e.clientY);if(id)selectSlice(id);}};
@@ -268,6 +268,7 @@ installHelp();
 const post=postMerge({get:()=>({merged,mergeRevision,revision:store.revision,merging,mode:$('mode').value}),api,image,images,draw,error});
 window.postDebug=()=>post.debug();
 new ResizeObserver(draw).observe($('stage'));
+window.busyDebug=busyJobs;
 window.stitcherDebug=()=>({state:structuredClone(store.state),selected,merging,merged,mergeRevision,mergeStale:!!merged&&mergeRevision!==store.revision,revision:store.revision,undo:store.past.length,redo:store.future.length,loading,aligning,masking,ready:ready(),stemsReady:stemsReady(),computingStems,curveBusy,editHandles:store.state.slices.find(s=>s.id===selected)&&result(store.state.slices.find(s=>s.id===selected))?handlesFor(result(store.state.slices.find(s=>s.id===selected))):null,stale:stale(),preparing,mode:$('mode').value,masks:Object.fromEntries(store.state.slices.filter(s=>maskResult(s)).map(s=>[s.id,maskResult(s)])),layers:{...layers},camera:{...camera},images:images.size,results:Object.fromEntries(store.state.slices.filter(s=>result(s)).map(s=>[s.id,result(s)]))});
 refresh();
 // Update chip: poll served frontend files; never reload (the session lives in this tab).

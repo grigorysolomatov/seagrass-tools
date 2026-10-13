@@ -1,5 +1,43 @@
 import {handlesFor,paintCurve,paintHandles,hitHandle} from './curve_edit.mjs';
 import {floatingPlot} from './plot.mjs';
+// Working-state indicators shared by every long action. Spinners are pure CSS
+// transforms; JS only toggles classes and short N/M · elapsed text once a second.
+// Display only: never touches scientific state or request ownership.
+export function elapsed(ms){const s=Math.max(0,Math.floor(ms/1000));return s<60?s+' s':Math.floor(s/60)+' min '+String(s%60).padStart(2,'0')+' s';}
+export function progressText({done=0,total=0,phase=''}={}){return [phase,total>0?`${Math.min(done,total)}/${total}`:''].filter(Boolean).join(' ');}
+const jobs=new Set();let busyTimer=null;
+function paintBusy(){
+ const now=Date.now(),line=document.getElementById('activity');
+ for(const job of jobs){
+  const text=progressText(job),detail=[text,elapsed(now-job.start)].filter(Boolean).join(' · ');
+  for(const el of job.buttons){el.classList.add('busy');el.setAttribute('aria-busy','true');el.dataset.progress=job.total>0?`${Math.min(job.done,job.total)}/${job.total}`:'';}
+  for(const el of job.hints){el.classList.add('working');el.dataset.progress=detail;}
+  // Stable element per job: rewriting it would restart the CSS spinner.
+  if(!job.item&&line){job.item=document.createElement('span');job.item.className='activityItem';job.item.innerHTML='<span class="spinner" aria-hidden="true"></span><span></span>';line.append(job.item);}
+  if(job.item)job.item.lastChild.textContent=[job.label,detail].join(' · ');
+ }
+ document.body.classList.toggle('working',jobs.size>0);
+ if(line)line.hidden=!jobs.size;
+}
+function releaseBusy(job){
+ const held=el=>[...jobs].some(j=>j.buttons.includes(el)||j.hints.includes(el));
+ for(const el of job.buttons)if(!held(el)){el.classList.remove('busy');el.removeAttribute('aria-busy');delete el.dataset.progress;}
+ for(const el of job.hints)if(!held(el)){el.classList.remove('working');delete el.dataset.progress;}
+ job.item?.remove();
+}
+// Usage: beginBusy(label,{total,buttons,hints}) returns a job; call job.tick() per item and job.end() in finally.
+export function beginBusy(label,{total=0,buttons=[],hints=[]}={}){
+ const find=x=>typeof x==='string'?document.getElementById(x):x;
+ const job={label,total,done:0,phase:'',start:Date.now(),buttons:buttons.map(find).filter(Boolean),hints:hints.map(find).filter(Boolean),item:null};
+ jobs.add(job);
+ job.tick=(n=1)=>{job.done+=n;paintBusy();};
+ job.set=(v={})=>{for(const k of ['done','total','phase','label'])if(v[k]!==undefined)job[k]=v[k];paintBusy();};
+ job.end=()=>{if(!jobs.delete(job))return;releaseBusy(job);paintBusy();if(!jobs.size&&busyTimer){clearInterval(busyTimer);busyTimer=null;}};
+ if(!busyTimer)busyTimer=setInterval(paintBusy,1000);
+ paintBusy();return job;
+}
+export async function trackBusy(label,options,fn){const job=beginBusy(label,options);try{return await fn(job);}finally{job.end();}}
+export function busyJobs(){return [...jobs].map(j=>({label:j.label,done:j.done,total:j.total,phase:j.phase,elapsed_ms:Date.now()-j.start}));}
 const fitTopHelp='Select the highest raw heights within each slice’s finite prepared foreground (default 20%), then clip the fitted curve to its prepared leaf boundary. The same population and inclusive percentile are used for the combined stem. Higher % includes more, lower pixels. This is not the mask cutoff; the mask seed stays fixed at top 5%. Edits retain placement until Align.';
 const degreeHelp='Polynomial degree (1–8). Increase only when a simpler curve misses real bending; higher degrees can oscillate or overshoot, especially at the ends. Inspect Curve & ends rather than assuming higher is more accurate.';
 const HELP={
@@ -131,7 +169,7 @@ export function postMerge({get,api,image,images,draw,error}){
  async function download(kind){
   if(exportBusy||!exportReady(kind))return;
   const revision=get().revision,generation=exportGeneration,payload=exportPayload(kind),signature=JSON.stringify(payload);
-  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();
+  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing '+kind+' CSV',{buttons:['download'+(kind==='borders'?'Borders':'Trichomes')],hints:['exportStatus']});
   try{
    const result=await api('/api/export',payload);
    if(revision!==get().revision||generation!==exportGeneration||!exportReady(kind)||signature!==JSON.stringify(exportPayload(kind)))throw Error('Discarded: export settings or scientific inputs changed. Download again.');
@@ -140,7 +178,7 @@ export function postMerge({get,api,image,images,draw,error}){
    $('filename'+(kind==='borders'?'Borders':'Trichomes')).value=result.filename;
    $('exportStatus').textContent=`Download ready · ${result.filename} · ${result.count.toLocaleString()} rows · base ${result.base.toUpperCase()}`;
   }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
-  finally{exportBusy=false;status();}
+  finally{job.end();exportBusy=false;status();}
  }
  $('downloadBorders').onclick=()=>download('borders');$('downloadTrichomes').onclick=()=>download('trichomes');
  for(const id of ['filenameBorders','filenameTrichomes','leafBase','stemTop','stemDegree','medianWindow','medianBits','peakWindow','borderStepMm','heightCutoffEnabled','heightCutoffMm','inwardMarginMm','exportQuality'])$(id).addEventListener('input',()=>{exportGeneration++;if(!exportBusy)$('exportStatus').textContent='';});
@@ -185,7 +223,7 @@ export function postMerge({get,api,image,images,draw,error}){
   $('computeCandidates').textContent=busy==='residual'?'Computing median…':busy==='peaks'?'Finding central maxima…':'Compute candidates';
   $('stemStatus').textContent=curveBusy?'Validating manual curve…':busy==='stem'?'Selecting raw top % independently in each prepared slice…':failure.startsWith('stem:')?'Failed · '+failure.slice(5):!m?'Merge first · previous derived results unavailable.':s?`${stem.fit.manual?'Manual':'Automatic'} · ${stem.fit.selected_pixels.toLocaleString()} observations · per slice ${stem.fit.sources.map(s=>s.selected_pixels.toLocaleString()).join(' / ')} · ${stem.segments} sections${stem.fit.clipped?' · requested ends outside tissue; geometry clipped':''}`:stem?'Stale · fit merged stem again.':'One curve from the top % of EACH prepared slice.';
   $('stemStatus').title=s?stem.fit.sources.map((v,i)=>`Slice ${i+1}: ${v.selected_pixels} / ${v.valid_pixels} (${v.selected_percent.toFixed(3)}%), raw cutoff ${v.cutoff_mm.toPrecision(7)} mm`).join('\n'):'';
-  $('candidateStatus').textContent=['residual','peaks'].includes(busy)?'Computing · edits discard obsolete responses.':failure.startsWith('detection:')?'Failed · '+failure.slice(10):!m?'Merge first · previous derived results unavailable.':p?`Current · ${peaks.count.toLocaleString()} candidates · ${residual.quantization.bits}-bit median (bin ${residual.quantization.bin_width_mm.toPrecision(3)} mm)` :!s?'Fit current merged stem first.':peaks?'Stale candidates · '+(r?'median retained; compute peaks again.':'compute median and peaks again.'):'Ready · median subtraction then centered maximum.';
+  $('candidateStatus').textContent=busy==='residual'?'Median background, then centered maxima…':busy==='peaks'?'Finding centered maxima…':failure.startsWith('detection:')?'Failed · '+failure.slice(10):!m?'Merge first · previous derived results unavailable.':p?`Current · ${peaks.count.toLocaleString()} candidates · ${residual.quantization.bits}-bit median (bin ${residual.quantization.bin_width_mm.toPrecision(3)} mm)` :!s?'Fit current merged stem first.':peaks?'Stale candidates · '+(r?'median retained; compute peaks again.':'compute median and peaks again.'):'Ready · median subtraction then centered maximum.';
   $('windowHint').textContent='';$('windowHint').title=m?`Native grid: median ${(value('medianWindow')*g.merged.spacing_mm[0]).toFixed(3)} mm; detection ${(value('peakWindow')*g.merged.spacing_mm[0]).toFixed(3)} mm. Edge exclusion radius ${(value('medianWindow')-1)/2+(value('peakWindow')-1)/2} px.`:'';
   if(!r)diagnosticPreview='';
   for(const [id,mode] of [['previewMedian','median'],['previewResidual','residual']]){
@@ -204,48 +242,49 @@ export function postMerge({get,api,image,images,draw,error}){
  async function connect(){
   if(!stemCurrent())return;
   const generation=++connectionGeneration,sg=stemGeneration,dg=detectionGeneration,revision=get().revision,sk=stem.key,pk=peaksCurrent()?peaks.key:null;
-  connectionBusy=true;connectionFailure='';status();
+  connectionBusy=true;connectionFailure='';status();const job=beginBusy('Finding nearest stem points',{hints:['connectionStatus']});
   try{const r=await api('/api/post/connections',{stem_key:sk,peaks_key:pk});
    if(generation===connectionGeneration&&sg===stemGeneration&&dg===detectionGeneration&&get().revision===revision&&stemCurrent()&&stem.key===sk&&(!pk||(peaksCurrent()&&peaks.key===pk)))connections=r;
   }catch(e){if(generation===connectionGeneration)connectionFailure=e.message;}
-  finally{if(generation===connectionGeneration)connectionBusy=false;status();draw();}
+  finally{job.end();if(generation===connectionGeneration)connectionBusy=false;status();draw();}
  }
  async function assets(r){await Promise.all(Object.entries(r.assets).filter(([k])=>k!=='points').map(([,url])=>image(url)));return r;}
  async function fit(){
   if($('computeStem').disabled)return;
   const g=get(),revision=g.revision,generation=stemGeneration,key=g.merged.key;
-  const payload={merge_key:key,top:value('stemTop'),degree:value('stemDegree')};busy='stem';failure='';error();status();
+  const payload={merge_key:key,top:value('stemTop'),degree:value('stemDegree')};busy='stem';failure='';error();status();const job=beginBusy('Fitting merged stem',{buttons:['computeStem'],hints:['stemStatus']});
   try{const r=await assets(await api('/api/post/stem',payload));
    if(get().revision!==revision||get().merged?.key!==key||generation!==stemGeneration)throw Error('Discarded: setup or stem settings changed. Fit again.');
    if(stem&&stem.revision===revision){curvePast.push(stem);curveFuture=[];}else{curvePast=[];curveFuture=[];}stem={...r,revision};automaticStem=stem;automaticStems.set(stem.key,stem);stemGeneration++;diagnosticPreview='';$('mode').value='merged';await connect();
-  }catch(e){failure='stem:'+e.message;error(e.message);}finally{busy='';status();draw();}
+  }catch(e){failure='stem:'+e.message;error(e.message);}finally{job.end();busy='';status();draw();}
  }
  async function detect(){
   if($('computeCandidates').disabled)return;
   const g=get(),revision=g.revision,generation=detectionGeneration,key=g.merged.key;
   const unchanged=()=>get().revision===revision&&get().merged?.key===key&&generation===detectionGeneration;
   const window=value('peakWindow'),median=value('medianWindow'),bits=value('medianBits');failure='';error();
+  const steps=residualCurrent()?1:2,job=beginBusy('Computing candidates',{total:steps,buttons:['computeCandidates'],hints:['candidateStatus']});
   try{
    if(!residualCurrent()){
-    busy='residual';status();const r=await assets(await api('/api/post/residual',{merge_key:key,window:median,bits}));
+    job.set({phase:'median'});busy='residual';status();const r=await assets(await api('/api/post/residual',{merge_key:key,window:median,bits}));
     if(!unchanged())throw Error('Discarded: setup or detection settings changed. Compute again.');
-    residual={...r,revision};
+    residual={...r,revision};job.tick();
    }
-   busy='peaks';status();const r=await api('/api/post/peaks',{merge_key:key,residual_key:residual.key,window});
+   job.set({phase:'maxima'});busy='peaks';status();const r=await api('/api/post/peaks',{merge_key:key,residual_key:residual.key,window});
    const response=await fetch(r.assets.points);if(!response.ok)throw Error('Could not read candidate coordinates');
    const xy=new Int32Array(await response.arrayBuffer());if(xy.length!==r.count*2)throw Error('Candidate coordinate count mismatch');
    if(!unchanged())throw Error('Discarded: setup or detection settings changed. Compute again.');
-   peaks={...r,revision};points=xy;diagnosticPreview='';$('mode').value='merged';await connect();
-  }catch(e){failure='detection:'+e.message;error(e.message);}finally{busy='';status();draw();}
+   peaks={...r,revision};points=xy;job.tick();diagnosticPreview='';$('mode').value='merged';await connect();
+  }catch(e){failure='detection:'+e.message;error(e.message);}finally{job.end();busy='';status();draw();}
  }
  async function computeBorders(){
   if($('computeBorders').disabled)return;
   const generation=++borderGeneration,sg=stemGeneration,revision=get().revision,sk=stem.key,step=value('borderStepMm'),options=borderOptions();
-  borderBusy=true;borderFailure='';status();
+  borderBusy=true;borderFailure='';status();const job=beginBusy('Computing leaf borders',{buttons:['computeBorders'],hints:['borderStatus']});
   try{const r=await api('/api/post/borders',{stem_key:sk,step_mm:step,...options});
    if(generation!==borderGeneration||sg!==stemGeneration||revision!==get().revision||!stemCurrent()||stem.key!==sk||step!==value('borderStepMm'))throw Error('Discarded: stem, merge or sampling changed. Compute again.');
    borders={...r,revision};
-  }catch(e){borderFailure=e.message;error(e.message);}finally{borderBusy=false;status();draw();}
+  }catch(e){borderFailure=e.message;error(e.message);}finally{job.end();borderBusy=false;status();draw();}
  }
  $('computeBorders').onclick=computeBorders;
  for(const id of ['borderStepMm','heightCutoffEnabled','heightCutoffMm','inwardMarginMm'])$(id).oninput=()=>{borderGeneration++;borderFailure='';status();draw();};
@@ -343,7 +382,7 @@ export function postMerge({get,api,image,images,draw,error}){
   if(guideScreen&&($('guideMedian').checked||$('guideDetection').checked)&&Math.abs(p[0]-guideScreen[0])<=guideRadius&&Math.abs(p[1]-guideScreen[1])<=guideRadius){guideGesture={id:e.pointerId,start:p,offset:[...guideOffset]};$('canvas').setPointerCapture(e.pointerId);return true;}return false;
  }
  function pointerMove(e,camera){const p=pointerScreen(e);if(curveGesture){const g=curveGesture;if(e.pointerId!==g.id)return true;const r=get().merged.spacing_mm[0];g.handles[g.index]=handlesFor(g.original)[g.index].map((v,k)=>v+(p[k]-g.start[k])/(r*camera.scale));g.moved=true;draw();return true;}if(guideGesture){guideOffset=guideGesture.offset.map((v,k)=>v+(p[k]-guideGesture.start[k])/camera.scale);draw();return true;}return false;}
- async function commitCurve(g){if(!g.moved){status();draw();return;}curveBusy=true;status();try{const r=await api('/api/curve/edit',{kind:'stem',key:g.original.key,handles:g.handles});if(g.revision!==get().revision||g.generation!==stemGeneration||!stemCurrent())throw Error('Manual curve discarded: scientific inputs changed.');curvePast.push(stem);curveFuture=[];changeStem({...r,revision:g.revision});error();}catch(e){failure='stem:'+e.message;error(e.message);}finally{curveBusy=false;status();draw();}}
+ async function commitCurve(g){if(!g.moved){status();draw();return;}curveBusy=true;status();const job=beginBusy('Checking edited curve',{hints:['stemStatus']});try{const r=await api('/api/curve/edit',{kind:'stem',key:g.original.key,handles:g.handles});if(g.revision!==get().revision||g.generation!==stemGeneration||!stemCurrent())throw Error('Manual curve discarded: scientific inputs changed.');curvePast.push(stem);curveFuture=[];changeStem({...r,revision:g.revision});error();}catch(e){failure='stem:'+e.message;error(e.message);}finally{job.end();curveBusy=false;status();draw();}}
  function pointerUp(e){if(curveGesture){const g=curveGesture;curveGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);commitCurve(g);return true;}if(guideGesture){guideGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);return true;}return false;}
  function pointerCancel(){let changed=false;if(curveGesture){curveGesture=null;changed=true;}if(guideGesture){guideOffset=guideGesture.offset;guideGesture=null;changed=true;}if(changed){status();draw();}}
  return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};

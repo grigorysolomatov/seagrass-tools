@@ -51,3 +51,13 @@ label:has(input[type=checkbox]){min-height:24px;align-content:center}
 .sliceSpin{display:inline-block;width:9px;height:9px;border:2px solid #555;border-top-color:var(--pink);border-radius:50%;animation:sliceSpin .9s linear infinite}
 @keyframes sliceSpin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.sliceSpin{animation-duration:3s}}
+
+/* Working state: CSS-transform spinners; JS only sets classes and N/M · elapsed text. */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner,button.busy::before,.hint.working::before,#plotStatus.working::before{content:'';display:inline-block;flex:none;width:9px;height:9px;border:2px solid #444;border-top-color:var(--pink);border-radius:50%;animation:spin .9s linear infinite;vertical-align:-2px;margin-right:6px}
+button.busy,button.busy:disabled{opacity:1;cursor:progress;border-color:var(--pink);background:#250014;color:#fff}
+button.busy[data-progress]:not([data-progress=""])::after{content:' · ' attr(data-progress);color:#ddd}
+.hint.working{color:#ddd}.hint.working[data-progress]:not([data-progress=""])::after{content:' · ' attr(data-progress);color:#aaa;white-space:nowrap}
+#activity{display:flex;gap:14px;color:#fff}#activity .activityItem{display:inline-flex;align-items:center;white-space:nowrap}
+body.working #status{color:#888}
+@media (prefers-reduced-motion:reduce){.spinner,button.busy::before,.hint.working::before,#plotStatus.working::before{animation-duration:2.4s}}
