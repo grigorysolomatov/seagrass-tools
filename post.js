@@ -181,6 +181,38 @@ export function postMerge({get,api,image,images,draw,error}){
   finally{job.end();exportBusy=false;status();}
  }
  $('downloadBorders').onclick=()=>download('borders');$('downloadTrichomes').onclick=()=>download('trichomes');
+ // Leaf area follows each current merge automatically (cached server-side). Display and export only.
+ let leafArea=null,areaBusy=false,areaFailure='',areaRequested=null;
+ const areaCurrent=()=>!!(leafArea&&mergeCurrent()&&leafArea.merge_key===get().merged.key);
+ const mm2=v=>v.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})+' mm²';
+ async function computeArea(){
+  const key=get().merged.key;areaRequested=key;areaBusy=true;areaFailure='';status();
+  const job=beginBusy('Measuring leaf area',{hints:['areaStatus']});
+  try{const r=await api('/api/area',{merge_key:key});if(areaRequested===key)leafArea=r;}
+  catch(e){if(areaRequested===key)areaFailure=e.message;}
+  finally{job.end();if(areaRequested===key)areaBusy=false;status();}
+ }
+ function areaStatus(){
+  const g=get(),el=$('areaStatus'),p=peaksCurrent();el.hidden=!g.merged;
+  if(mergeCurrent()&&!areaBusy&&areaRequested!==g.merged.key)computeArea();
+  const a=areaCurrent()?leafArea:null;
+  el.textContent=areaBusy?'Measuring leaf area…':areaFailure?'Leaf area failed · '+areaFailure:!mergeCurrent()?(g.merging?'':'Leaf area · merge again to update.'):a?`Leaf area · flat ${mm2(a.flat_mm2)} · 3D ${mm2(a.surface_mm2)} (×${a.ratio.toFixed(3)})`+(p?` · ${peaks.count.toLocaleString()} candidates = ${(peaks.count/a.flat_mm2).toFixed(1)} / ${(peaks.count/a.surface_mm2).toFixed(1)} per mm² (flat / 3D)`:''):'';
+  const cal=a?a.calibration.map((c,i)=>`Slice ${i+1}: ${(c.pixel_mm[0]*1000).toFixed(4)} × ${(c.pixel_mm[1]*1000).toFixed(4)} µm/px${c.scan_yaml_relative_difference!==null&&c.scan_yaml_relative_difference<1e-6?' (matches scan.yaml)':''} · flat ${mm2(a.slices[i].flat_mm2)} · 3D ${mm2(a.slices[i].surface_mm2)}`).join('\n'):'';
+  el.title=a?`Prepared-foreground area of the current merge, in mm². Flat = projected area: covered cells × (${(a.cell_mm*1000).toFixed(4)} µm)². 3D = area of the measured height surface, including trichomes: each cell × √(1 + slope²), slopes from raw TMD heights (mm) on each slice's native grid, between foreground neighbours only. Leaf-edge walls, background and slice seams are not counted; overlaps count once. Calibration from each TMD header:\n${cal}`:'Leaf area in mm², measured automatically after each Merge.';
+  el.setAttribute('aria-description',el.title);
+  const b=$('downloadArea');b.disabled=exportBusy||!a;b.title=a?'CSV: flat and 3D leaf area (mm²), per-slice areas, pixel size'+(p?', and candidates per mm².':'.'):'Requires a current Merge.';
+ }
+ async function downloadArea(){
+  if(exportBusy||!areaCurrent())return;const key=leafArea.merge_key,pk=peaksCurrent()?peaks.key:null;
+  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing leaf area CSV',{buttons:['downloadArea'],hints:['exportStatus']});
+  try{const r=await api('/api/area/export',{merge_key:key,peaks_key:pk,filename:'leaf-area.csv'});
+   if(!areaCurrent()||leafArea.merge_key!==key)throw Error('Discarded: merge changed. Download again.');
+   const url=URL.createObjectURL(new Blob([r.csv],{type:'text/csv;charset=utf-8'})),anchor=document.createElement('a');anchor.href=url;anchor.download=r.filename;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+   $('exportStatus').textContent=`Download ready · ${r.filename} · mm²${r.candidates!==null?' · with candidate density':''}`;
+  }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
+  finally{job.end();exportBusy=false;status();}
+ }
+ $('downloadArea').onclick=downloadArea;
  for(const id of ['filenameBorders','filenameTrichomes','leafBase','stemTop','stemDegree','medianWindow','medianBits','peakWindow','borderStepMm','heightCutoffEnabled','heightCutoffMm','inwardMarginMm','exportQuality'])$(id).addEventListener('input',()=>{exportGeneration++;if(!exportBusy)$('exportStatus').textContent='';});
  let borders=null,borderBusy=false,borderFailure='',borderGeneration=0;
  let connections=null,connectionBusy=false,connectionFailure='',connectionGeneration=0;
@@ -202,6 +234,7 @@ export function postMerge({get,api,image,images,draw,error}){
   $('undoMergedCurve').disabled=!s||!curvePast.length||curveBusy||!!busy;
   $('redoMergedCurve').disabled=!s||!curveFuture.length||curveBusy||!!busy;
   $('previewPlot').disabled=!exportReady('borders')&&!exportReady('trichomes');
+  areaStatus();
   $('heightCutoffMm').disabled=!$('heightCutoffEnabled').checked;
   for(const suffix of ['minus','plus'])$('heightCutoffMm-'+suffix).disabled=$('heightCutoffMm').disabled;
   plot.sync();
@@ -385,5 +418,5 @@ export function postMerge({get,api,image,images,draw,error}){
  async function commitCurve(g){if(!g.moved){status();draw();return;}curveBusy=true;status();const job=beginBusy('Checking edited curve',{hints:['stemStatus']});try{const r=await api('/api/curve/edit',{kind:'stem',key:g.original.key,handles:g.handles});if(g.revision!==get().revision||g.generation!==stemGeneration||!stemCurrent())throw Error('Manual curve discarded: scientific inputs changed.');curvePast.push(stem);curveFuture=[];changeStem({...r,revision:g.revision});error();}catch(e){failure='stem:'+e.message;error(e.message);}finally{job.end();curveBusy=false;status();draw();}}
  function pointerUp(e){if(curveGesture){const g=curveGesture;curveGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);commitCurve(g);return true;}if(guideGesture){guideGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);return true;}return false;}
  function pointerCancel(){let changed=false;if(curveGesture){curveGesture=null;changed=true;}if(guideGesture){guideOffset=guideGesture.offset;guideGesture=null;changed=true;}if(changed){status();draw();}}
- return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
+ return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({leafArea:areaCurrent()?leafArea:null,areaBusy,areaFailure,editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
 }

@@ -12,6 +12,7 @@
 !csv_exports.py
 !curve_edit.py
 !stem_arc.py
+!area.py
 !server.py
 !app.js
 !post.js

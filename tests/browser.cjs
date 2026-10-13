@@ -17,6 +17,7 @@ try{
  await p.locator('#editSliceCurve').check();assert(await p.locator('#resetSliceCurve').isVisible());await p.locator('#editSliceCurve').uncheck();assert(await p.locator('#resetSliceCurve').isHidden());
  await p.locator('#align').click();await p.waitForFunction(()=>window.stitcherDebug().state.aligned&&!window.stitcherDebug().aligning);
  await p.locator('#merge').click();await p.waitForFunction(()=>window.stitcherDebug().merged&&!window.stitcherDebug().merging);
+ await p.waitForFunction(()=>!!window.postDebug().leafArea);{const a=await p.evaluate(()=>window.postDebug().leafArea);assert(a.flat_mm2>0&&a.surface_mm2>=a.flat_mm2*(1-1e-9));assert(!(await p.locator('#areaStatus').textContent()).includes('failed'));checks.push('leaf area after merge: flat and 3D mm², 3D ≥ flat');}
  await p.locator('#computeStem').click();await p.waitForFunction(()=>window.postDebug().stemCurrent&&!window.postDebug().busy);
  const cohort=await p.evaluate(()=>{const d=window.stitcherDebug(),s=window.postDebug().stem;return s.fit.sources.map(src=>({individual:d.results[src.path].fit,combined:src}));});
  for(const {individual,combined} of cohort){assert.equal(individual.cutoff_mm,combined.cutoff_mm);assert.equal(individual.selected_pixels,combined.selected_pixels);assert.equal(individual.valid_pixels,combined.valid_pixels);}
@@ -30,6 +31,7 @@ try{
  await p.locator('#computeBorders').click();await p.waitForFunction(()=>window.postDebug().bordersCurrent&&!window.postDebug().busy);
  for(const base of ['a','b']){
   await p.locator('#leafBase').selectOption(base);await p.locator('#previewPlot').click();await p.waitForFunction(b=>window.stemPlotDebug().ready&&window.stemPlotDebug().base===b,base);
+  {const got=p.waitForEvent('download');await p.locator('#downloadArea').click();const file=await got;await file.saveAs(path.join(out,`leaf-area-${base}.csv`));assert(!await file.failure());assert(fs.readFileSync(path.join(out,`leaf-area-${base}.csv`),'utf8').includes('candidates_per_3d_area'));}
   for(const [button,kind] of [['downloadBorders','borders'],['downloadTrichomes','trichomes']]){const got=p.waitForEvent('download');await p.locator('#'+button).click();const file=await got;await file.saveAs(path.join(out,`${kind}-${base}.csv`));assert(!await file.failure());}
   fs.writeFileSync(path.join(out,`plot-${base}.json`),JSON.stringify(await p.evaluate(()=>window.stemPlotDebug())));
  }

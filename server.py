@@ -19,11 +19,13 @@ import nearest_stem
 import leaf_borders
 import csv_exports
 import curve_edit
+import area
 from science import decode
 
 HERE=engine.HERE
 SCIENCE_LOCK=threading.Lock()  # Post-merge stages are serialized; per-slice mask/fit use engine's bounded workers and per-key locks.
 LOAD_LOCK=threading.Lock()
+AREA_LOCK=threading.Lock()
 LOADS=set()
 
 def load_slice(path):
@@ -91,6 +93,12 @@ class Handler(engine.Handler):
    body=json.loads(self.rfile.read(length))
    if self.path=='/api/curve/edit':
     with SCIENCE_LOCK:r=curve_edit.request(body)
+    return self.respond(200,r)
+   if self.path=='/api/area':
+    with AREA_LOCK:r=area.request(body)  # cached merge only; own lock, never blocks stems/candidates
+    return self.respond(200,r)
+   if self.path=='/api/area/export':
+    with AREA_LOCK:r=area.export(body)
     return self.respond(200,r)
    if self.path=='/api/plot':
     with SCIENCE_LOCK:r=csv_exports.request({**body,'plot':True,'quality':True,'filename':'plot.csv'})
