@@ -50,8 +50,8 @@ const HELP={
  canvas:'Click a slice to select it; drag to pan; wheel to zoom. Blank clicks retain selection. These viewing actions do not change the scientific data or edit history.',
  undo:'Undo composition and parameter edits, preparation, Align or joint corrections in this tab. View mode, overlays, selection, pan and zoom are not edit history. Refresh clears the setup and history.',
  redo:'Redo an undone composition edit in this tab. Does not restore view changes or a setup lost on refresh.',
- folderPath:'Root folder to browse for scan subfolders. Browse accepts this root; check scan rows to choose what Load adds. Changing to a different root clears the pending selection.',
- browse:'List scan subfolders of the root path. This does not load scans; select their checkboxes, then Load.',
+ folderPath:'Current folder (address bar). Type a path under the data folder and press Enter or Go. Moving to another folder clears ticked scans.',
+ browse:'Go to the folder typed in the path box. Tick scans there, then Load.',
 };
 const jointHelp={
  along:'Incremental translation in mm along the moving slice’s current joint direction, including its own rotation. Positive moves forward along that direction; all downstream slices move together. Buttons / arrow keys: 0.1 mm. After rotations, setting zero is not a reset; use Undo or Align again.',
