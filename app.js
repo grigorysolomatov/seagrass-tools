@@ -3,13 +3,14 @@ import {postMerge,installHelp,applyHelp,setHelp,beginBusy,busyJobs} from './post
 import {photoCompositor} from './blend.mjs';
 import {handlesFor,paintCurve,paintHandles,hitHandle} from './curve_edit.mjs';
 import {handResult,insideSlice,appendPoint,hitPoint,paintHand} from './hand_stem.mjs';
+import {buildSession,parseSession,sessionState,compareResults,sessionFilename} from './session.mjs';
 const photoBlend=photoCompositor();
 window.photoBlendDebug=()=>photoBlend.debug();
 const $=id=>document.getElementById(id),store=new Store(),canvas=$('canvas'),ctx=canvas.getContext('2d');
 const images=new Map(),fits=new Map(),pendingFits=new Map(),maskedHeights=new Map(),masks=new Map(),pendingMasks=new Map();
 let selected=null,loading=false,aligning=false,masking=false,preparing=0,previewTimer=null,dragId=null,selectedJoint=0,showSource=false;
 let merging=false,merged=null,mergeRevision=-1,mergeError='';
-let computingStems=false,curveBusy=false,sliceGesture=null,handGesture=null;
+let computingStems=false,curveBusy=false,sliceGesture=null,handGesture=null,sessionBusy=false;
 // Per-slice job badges for steps 2-3; results stream into the workspace as each slice finishes.
 const sliceJobs=new Map();let streamState=null,workerLimit=null;
 let camera={scale:20,x:30,y:70},layers={highlight:false,curve:false};
@@ -47,7 +48,7 @@ async function api(path,data){const r=await fetch(path,data?{method:'POST',heade
 async function image(url){if(images.has(url))return images.get(url);const im=new Image();im.src=url;await im.decode();images.set(url,im);return im;}
 function status(){
  post.status();
- const s=store.state,ok=ready(),busy=loading||masking||aligning||computingStems||curveBusy;
+ const s=store.state,ok=ready(),busy=loading||masking||aligning||computingStems||curveBusy||sessionBusy;
  const chosen=s.slices.find(s=>s.id===selected),current=chosen&&result(chosen);
  $('computeSliceStems').disabled=busy||!ok;
  $('computeSliceStems').textContent=computingStems?'Computing slice stems…':'Compute slice stems';$('computeSliceStems').classList.toggle('working',computingStems);
@@ -62,6 +63,8 @@ function status(){
  $('mode').querySelector('[value=merged]').disabled=!merged;
  $('mergeStatus').textContent=merging?'Computing raw foreground maximum… Edits will discard this run.':mergeError?'Merge failed · '+mergeError:mergeStale?'Stale · setup edited. Merge again; slices remain editable.':merged?`Current · ${merged.dimensions.join(' × ')} · ${merged.spacing_mm[0].toPrecision(4)} mm/pixel · max of raw heights`:!ok||!s.aligned?'Remove background and align first.':'Ready · max of raw foreground heights on one physical grid.';
  for(const card of $('slices').children){const item=s.slices[+card.dataset.index];if(item){card.querySelector('small').textContent=cardLabel(item);const badge=jobBadge(item.id),box=card.querySelector('.sliceJobBox');if(box&&box.dataset.html!==badge){box.dataset.html=badge;box.innerHTML=badge;}}}
+ $('saveSession').disabled=busy||merging||sessionBusy||!s.slices.length;$('openSession').disabled=busy||merging||sessionBusy;
+ $('saveSession').title=s.slices.length?'Download a small JSON file describing this work: scans (checked by size and SHA-256), order, orientation, mask and stem settings, hand-drawn and edited stems, alignment and joint corrections, outline edits and later settings. Open it later, or on another computer with the same scans, to continue.':'Load scans first.';
  $('undo').disabled=busy||(!store.past.length&&!store.pending);$('redo').disabled=busy||!store.future.length;
  $('add').disabled=busy;$('add').classList.toggle('accent',!s.slices.length);$('load').disabled=loading;
  $('align').disabled=busy||!stemsReady()||s.slices.length<2;
@@ -293,6 +296,58 @@ canvas.onpointerdown=e=>{if(pointer||sliceGesture||handGesture||e.button!==0)ret
 canvas.onpointermove=e=>{if(handGesture){const s=store.state.slices.find(x=>x.id===handGesture.slice);handGesture.points[handGesture.index]=nativePointer(e,s).map(v=>Math.round(v*100)/100);handGesture.moved=true;draw();return;}if(sliceGesture){const g=sliceGesture,p=nativePointer(e,g.slice),h=handlesFor(g.r)[g.index];g.handles[g.index]=h.map((v,k)=>v+p[k]-g.start[k]);g.moved=true;draw();return;}if(post.pointerMove(e,camera))return;if(!pointer||e.pointerId!==pointer.id)return;const dx=e.clientX-pointer.x,dy=e.clientY-pointer.y;if(Math.hypot(dx,dy)>4)pointer.dragging=true;if(pointer.dragging){camera.x=pointer.cameraX+dx;camera.y=pointer.cameraY+dy;draw();}};
 canvas.onpointerup=e=>{if(handGesture){finishHand(e);return;}if(sliceGesture){finishSlice(e);return;}if(post.pointerUp(e,camera))return;if(!pointer||e.pointerId!==pointer.id)return;const click=!pointer.dragging&&Math.hypot(e.clientX-pointer.x,e.clientY-pointer.y)<=4;pointer=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(click){if(handSlice()){addHandPoint(e);return;}const id=sliceAt(e.clientX,e.clientY);if(id)selectSlice(id);}};
 canvas.onpointercancel=canvas.onlostpointercapture=()=>{pointer=null;if(handGesture){handGesture=null;draw();}if(sliceGesture){sliceGesture=null;draw();}post.pointerCancel();};
+// Save / open a session (session.mjs, session.py). The file holds how the slices relate; derived
+// arrays are recomputed from the checked scans on open. Poses and joints are restored exactly.
+let sessionReport=null;
+const sessionStatus=t=>{$('sessionStatus').textContent=t;};
+const mergeCurrentNow=()=>!!merged&&mergeRevision===store.revision&&!merging;
+const anyBusy=()=>loading||masking||aligning||computingStems||curveBusy||merging||sessionBusy||busyJobs().length>0;
+function sessionResults(){const r=post.sessionResults();return {merge:mergeCurrentNow()?{dimensions:merged.dimensions,spacing_mm:merged.spacing_mm,origin_center_mm:merged.origin_center_mm,valid_cells:merged.valid_cells,height_range_mm:merged.height_range_mm}:null,...r};}
+function download(name,text,type){const url=URL.createObjectURL(new Blob([text],{type})),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
+async function saveSession(){
+ if(!store.state.slices.length)return;if(anyBusy()){error('Wait for the running step to finish, then save.');return;}store.end();
+ sessionBusy=true;error();status();const job=beginBusy('Saving session',{buttons:['saveSession'],hints:['sessionStatus']});sessionStatus('Checking scan files');
+ try{const revision=store.revision,{sources}=await api('/api/session/describe',{paths:store.state.slices.map(s=>s.path)});
+  if(revision!==store.revision)throw Error('Setup changed while saving; save again.');
+  const st=store.state,edited=st.slices.map(s=>s.computedFitKey===fitKey(s)&&s.manualResult?s.manualResult.fit.handles:null);
+  const doc=buildSession(st,sources,{edited,alignedCurrent:st.aligned&&!stale(),steps:{background:ready(),stems:st.slices.some(s=>autoResult(s)),merge:mergeCurrentNow()},post:post.sessionData(),results:sessionResults()});
+  const filename=sessionFilename();download(filename,JSON.stringify(doc,null,1),'application/json');
+  sessionStatus(`Saved ${filename}`);
+ }catch(e){sessionStatus('Save failed');error('Save failed · '+e.message);}
+ finally{job.end();sessionBusy=false;status();}
+}
+async function openSession(file){
+ let doc;try{doc=parseSession(await file.text());}catch(e){error('Open failed · '+e.message);return;}
+ if(anyBusy()){error('Wait for the running step to finish, then open the session.');return;}
+ if(store.state.slices.length&&!confirm('Open this session? It replaces the slices and work in this tab. Save first if you need them.'))return;
+ store.end();sessionBusy=true;error();sessionReport=null;status();
+ const job=beginBusy('Opening session',{buttons:['openSession'],hints:['sessionStatus']}),phase=p=>{job.set({phase:p});sessionStatus('Opening session');};
+ try{
+  phase('checking scan files');const {paths}=await api('/api/session/resolve',{sources:doc.setup.slices.map(s=>s.scan)});
+  phase('loading scans');const loads=[];for(const path of paths){const r=await api('/api/load',{path});await Promise.all(Object.values(r.assets).map(image));loads.push(r);}
+  merged=null;mergeError='';mergeRevision=-1;sliceJobs.clear();$('mode').value='photo';post.clearPreview();
+  store.state=sessionState(doc,loads);store.past=[];store.future=[];store.pending=null;store.revision++;selected=null;
+  post.applySettings(doc.post?.settings);refresh();fitView();
+  const fail=what=>{throw Error(what+($('error').textContent?' · '+$('error').textContent:''));};
+  if(doc.steps.background){phase('removing background');await removeBackground();if(!ready())fail('Background removal failed');}
+  if(doc.steps.stems){phase('computing slice stems');await computeSliceStems();const missing=store.state.slices.map((s,i)=>result(s)?null:i+1).filter(Boolean);if(missing.length)fail('Slice stems failed for slice '+missing.join(', '));error();}
+  for(const [i,s] of doc.setup.slices.entries()){if(!s.editedCurve)continue;phase('restoring edited slice curves');const item=store.state.slices[i],auto=fits.get(fitKey(item));if(!auto||item.computedFitKey!==fitKey(item))fail(`Slice ${i+1}: automatic stem needed for its edited curve`);
+   const r=await api('/api/curve/edit',{kind:'slice',key:auto.key,handles:s.editedCurve.handles});store.edit(st=>{st.slices[i].manualResult=r;});}
+  if(doc.setup.alignedCurrent)store.edit(st=>{st.alignedSetup=setupKey(st);});
+  refresh();
+  if(doc.steps.merge){phase('merging');await doMerge();if(!mergeCurrentNow())fail('Merge failed');}
+  phase('restoring results');await post.restore(doc.post,job);
+  store.past=[];store.future=[];
+  const differences=compareResults(doc.results||{},sessionResults());sessionReport={differences,results:sessionResults(),saved:doc.results||{}};
+  sessionStatus(differences.length?'Opened · differs from saved: '+differences.join(', '):`Opened · ${paths.length} scans · results match the saved session`);
+  if(differences.length)error('Session reopened, but these results differ from when it was saved: '+differences.join(', ')+'. The scans match, so the program version may differ.');
+ }catch(e){sessionStatus('Open failed');error('Open failed · '+e.message);}
+ finally{job.end();sessionBusy=false;status();draw();}
+}
+$('saveSession').onclick=saveSession;
+$('openSession').onclick=()=>{$('sessionFile').value='';$('sessionFile').click();};
+$('sessionFile').onchange=()=>{const f=$('sessionFile').files[0];if(f)openSession(f);};
+window.sessionDebug=()=>({busy:sessionBusy,report:sessionReport,status:$('sessionStatus').textContent});
 installHelp();
 const post=postMerge({get:()=>({merged,mergeRevision,revision:store.revision,merging,mode:$('mode').value,hand:Object.fromEntries(store.state.slices.filter(handResult).map(s=>[s.path,s.handStem.points]))}),api,image,images,draw,error});
 window.postDebug=()=>post.debug();
@@ -301,7 +356,7 @@ window.busyDebug=busyJobs;
 window.stitcherDebug=()=>({state:structuredClone(store.state),selected,merging,merged,mergeRevision,mergeStale:!!merged&&mergeRevision!==store.revision,revision:store.revision,undo:store.past.length,redo:store.future.length,loading,aligning,masking,ready:ready(),stemsReady:stemsReady(),stemKinds:store.state.slices.map(stemKind),handMode:handOn(),computingStems,curveBusy,editHandles:store.state.slices.find(s=>s.id===selected)&&result(store.state.slices.find(s=>s.id===selected))&&!result(store.state.slices.find(s=>s.id===selected)).hand?handlesFor(result(store.state.slices.find(s=>s.id===selected))):null,stale:stale(),preparing,mode:$('mode').value,masks:Object.fromEntries(store.state.slices.filter(s=>maskResult(s)).map(s=>[s.id,maskResult(s)])),layers:{...layers},camera:{...camera},images:images.size,results:Object.fromEntries(store.state.slices.filter(s=>result(s)).map(s=>[s.id,result(s)]))});
 refresh();
 // Update chip: poll served frontend files; never reload (the session lives in this tab).
-(()=>{const files=['/','/app.js','/post.js','/blend.mjs','/model.mjs','/curve_edit.mjs','/hand_stem.mjs','/plot.mjs','/outline.mjs','/style.css'];let base=null,seen=null;
+(()=>{const files=['/','/app.js','/post.js','/blend.mjs','/model.mjs','/curve_edit.mjs','/hand_stem.mjs','/session.mjs','/plot.mjs','/outline.mjs','/style.css'];let base=null,seen=null;
  const digest=async()=>{const parts=await Promise.all(files.map(f=>fetch(f,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error(r.status);return r.arrayBuffer();})));const all=new Uint8Array(parts.reduce((n,b)=>n+b.byteLength+1,0));let o=0;for(const b of parts){all.set(new Uint8Array(b),o);o+=b.byteLength+1;}return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',all)),x=>x.toString(16).padStart(2,'0')).join('');};
  const chip=document.createElement('div');chip.id='updateChip';chip.hidden=true;chip.setAttribute('role','status');chip.innerHTML='<span>New version available. Refresh when convenient. Download CSVs first.</span><button type="button" aria-label="Hide notice" title="Hide">×</button>';document.body.append(chip);
  chip.querySelector('button').onclick=()=>{chip.hidden=true;};

@@ -554,5 +554,45 @@ export function postMerge({get,api,image,images,draw,error}){
  async function commitCurve(g){if(!g.moved){status();draw();return;}curveBusy=true;status();const job=beginBusy('Checking edited curve',{hints:['stemStatus']});try{const r=await api('/api/curve/edit',{kind:'stem',key:g.original.key,handles:g.handles});if(g.revision!==get().revision||g.generation!==stemGeneration||!stemCurrent())throw Error('Manual curve discarded: scientific inputs changed.');curvePast.push(stem);curveFuture=[];changeStem({...r,revision:g.revision});error();}catch(e){failure='stem:'+e.message;error(e.message);}finally{job.end();curveBusy=false;status();draw();}}
  function pointerUp(e){if(outlineGesture){if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);outlineUp();return true;}if(curveGesture){const g=curveGesture;curveGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);commitCurve(g);return true;}if(guideGesture){guideGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);return true;}return false;}
  function pointerCancel(){let changed=false;if(outlineGesture){outlineGesture=null;changed=true;}if(curveGesture){curveGesture=null;changed=true;}if(guideGesture){guideOffset=guideGesture.offset;guideGesture=null;changed=true;}if(changed){status();draw();}}
- return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({outline:{ready:outlineReady(),edited:edited(),key:outlineKey(),pending:outlinePending(),busy:outlineBusy,failure:outlineFailure,state:outlineState(),originalRings:outlineOriginal?.rings.length,originalPoints:outlineOriginal?.rings.reduce((n,a)=>n+a.length/2,0),editedPoints:editedRings()?.reduce((n,a)=>n+a.length/2,0),stats:outlineStats.get(outlineKey())||null,rings:()=>editedRings()?.map(a=>Array.from(a))},leafArea:areaCurrent()?leafArea:null,areaBusy,areaFailure,editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
+ // Saved session (session.mjs): settings, outline edits, which stages were current, combined-curve handles and headline numbers.
+ const SETTINGS=['stemTop','stemDegree','medianWindow','peakWindow','medianBits','borderStepMm','heightCutoffMm','inwardMarginMm','markerSize'],CHECKS=['heightCutoffEnabled','exportQuality','showStem','showTop','showCandidates','showLines','showBorders','showOutline'],TEXTS=['leafBase','exportKind'];
+ function sessionData(){
+  const s=stemCurrent(),p=peaksCurrent(),b=bordersCurrent(),e=mergeCurrent()?outlineState():noEdits();
+  return {settings:{...Object.fromEntries(SETTINGS.map(id=>[id,value(id)])),...Object.fromEntries(CHECKS.map(id=>[id,$(id).checked])),...Object.fromEntries(TEXTS.map(id=>[id,$(id).value])),exportNames:{...exportNames}},
+   outline:{smoothing_mm:e.sigmaMm,strokes:structuredClone(e.strokes)},
+   computed:{stem:!!s,stemHandles:s&&stem.fit.manual?stem.fit.handles:null,candidates:!!p,borders:!!b}};
+ }
+ function sessionResults(){
+  const a=areaCurrent()?leafArea:null,s=stemCurrent(),p=peaksCurrent(),b=bordersCurrent();
+  return {leaf_area:a?{flat_mm2:a.flat_mm2,surface_mm2:a.surface_mm2,outline_edited:!!a.outline_key}:null,
+   stem:s?{selected_pixels:stem.fit.selected_pixels,coefficients:stem.fit.coefficients,manual:!!stem.fit.manual,segments:stem.segments}:null,
+   candidates:p?{count:peaks.count}:null,borders:b?{count:borders.count,valid_count:borders.valid_count,length_mm:borders.length_mm}:null};
+ }
+ const until=async(test,ms=600000)=>{const t=Date.now();while(!test()){if(Date.now()-t>ms)throw Error('Timed out waiting for the result');await new Promise(r=>setTimeout(r,100));}};
+ function applySettings(settings={}){
+  for(const id of SETTINGS)if(Number.isFinite(settings[id]))$(id).value=settings[id];
+  for(const id of CHECKS)if(typeof settings[id]==='boolean')$(id).checked=settings[id];
+  for(const id of TEXTS)if(typeof settings[id]==='string'&&[...$(id).options].some(o=>o.value===settings[id]))$(id).value=settings[id];
+  for(const [k,v] of Object.entries(settings.exportNames||{}))if(k in exportNames&&typeof v==='string'&&v)exportNames[k]=v;
+  $('exportFilename').value=exportNames[exportKind()];
+  stemGeneration++;detectionGeneration++;borderGeneration++;exportGeneration++;status();draw();
+ }
+ // Recompute what was current when saved, in order: outline edits, leaf area, stem, edited stem, candidates, borders.
+ async function restore(saved,job){
+  const c=saved?.computed||{},o=saved?.outline;
+  if(!mergeCurrent())return;
+  if(o&&(o.smoothing_mm>0||o.strokes?.length)){
+   job?.set({phase:'leaf outline'});status();await until(()=>outlineReady()||!!outlineFailure);if(outlineFailure)throw Error('Leaf outline failed: '+outlineFailure);
+   const e=outlineState();e.sigmaMm=Number(o.smoothing_mm)||0;e.strokes=structuredClone(o.strokes||[]);e.past=[];e.future=[];syncOutlineInputs();exportGeneration++;borderGeneration++;scheduleRegister();
+   await until(()=>!!outlineKey()||!!outlineFailure);if(outlineFailure)throw Error('Edited outline could not be restored: '+outlineFailure);
+  }
+  job?.set({phase:'leaf area'});status();await until(()=>areaCurrent()||!!areaFailure);if(areaFailure)throw Error('Leaf area failed: '+areaFailure);
+  if(!c.stem)return;
+  job?.set({phase:'combined stem'});await fit();if(!stemCurrent())throw Error('Combined stem failed: '+(failure.replace(/^stem:/,'')||'unknown error'));
+  if(c.stemHandles){job?.set({phase:'edited combined curve'});await commitCurve({moved:true,original:stem,handles:c.stemHandles,revision:get().revision,generation:stemGeneration});if(!stemCurrent()||!stem.fit.manual)throw Error('Edited combined curve could not be restored: '+failure.replace(/^stem:/,''));}
+  if(c.candidates){job?.set({phase:'candidates'});await detect();if(!peaksCurrent())throw Error('Candidates failed: '+failure.replace(/^detection:/,''));}
+  if(c.borders){job?.set({phase:'leaf borders'});await computeBorders();if(!bordersCurrent())throw Error('Leaf borders failed: '+borderFailure);}
+  await until(()=>!connectionBusy);
+ }
+ return {sessionData,sessionResults,applySettings,restore,status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({outline:{ready:outlineReady(),edited:edited(),key:outlineKey(),pending:outlinePending(),busy:outlineBusy,failure:outlineFailure,state:outlineState(),originalRings:outlineOriginal?.rings.length,originalPoints:outlineOriginal?.rings.reduce((n,a)=>n+a.length/2,0),editedPoints:editedRings()?.reduce((n,a)=>n+a.length/2,0),stats:outlineStats.get(outlineKey())||null,rings:()=>editedRings()?.map(a=>Array.from(a))},leafArea:areaCurrent()?leafArea:null,areaBusy,areaFailure,editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
 }

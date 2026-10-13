@@ -19,6 +19,7 @@ This is a trusted-local scientific prototype, not a public service. Use `launch.
 - `hand_stem.py` / `.mjs`: hand-drawn slice stems (native polyline). Align uses its ends/end-segment tangents; the combined stem replaces that slice's top-% cohort by the same count of equal-arclength samples.
 - `nearest_stem.py`: finite-interval stationary-root nearest points with directed tie ordering.
 - `area.py`: flat and 3D (slope-weighted) leaf area in mm² of a merge; native-grid foreground-only gradients, each merged cell takes the slope of its maximum-height source. Area cache depends on merge key and area/merge implementation hashes.
+- `session.py` / `session.mjs`: saved sessions (JSON v1). Scans are identified by data-root-relative folder plus size and SHA-256 of every input file; open refuses any mismatch and recomputes everything derived, restoring poses/joints exactly (never re-Aligning). Bump `VERSION` for incompatible format changes.
 - `stem_arc.py`: **shared physical arclength** for borders, candidate coordinates, CSV and plot.
 - `leaf_borders.py`: arclength sections, first raster-cell exit, optional cutoff/margin.
 - `outline.py` / `outline.mjs`: leaf outline of the merge; smoothing/redraw geometry lives only in `.mjs`, the server rasterizes the edited rings into a region used by area and borders (key `outline_key`, null = original mask).
@@ -34,7 +35,7 @@ Both slice and combined fits select **finite prepared foreground raw heights** u
 
 Automatic fits project observations onto a signed PCA axis, normalize to [-1,1] and fit both coordinates with equal weights. This is not unrestricted looping-curve regression. Manual edits use exact degree-d power/Bernstein conversion with d+1 handles and an explicit parameter domain. Never recover a manually edited curve's parameter from the old PCA projection. Keep automatic baselines and finite support intervals immutable; draw extrapolation dashed and gaps missing.
 
-Load/mask/fit never move slices. Align explicitly consumes current curves, anchors the first orientation, solves followers and resets refinements. Joint rotation precedes incremental translations in the current rotated frame; downstream frames must follow. Zeroing counters after intervening rotations is not a geometric reset. Visibility controls never trigger science. In-session history is not persistence.
+Load/mask/fit never move slices. Align explicitly consumes current curves, anchors the first orientation, solves followers and resets refinements. Joint rotation precedes incremental translations in the current rotated frame; downstream frames must follow. Zeroing counters after intervening rotations is not a geometric reset. Visibility controls never trigger science. In-session history is not persistence; a saved session is the only persistence and stores settings and geometry, never derived arrays.
 
 Merging uses maximum original finite heights under native prepared masks, with identical sampling support for heights and masks. Do not initialize missing cells to zero or merge display stretches. Photo blending is display-only. No Z leveling without a separate scientific decision.
 

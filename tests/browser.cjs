@@ -39,6 +39,14 @@ try{
  }
  assert((await pick('outline','leaf-outline.csv')).toString().startsWith('ring,point,x_mm,y_mm'));{const tif=await pick('heightmap','heightmap.tif');assert(tif.length>1000&&tif.slice(0,2).toString()==='II');}
  checks.push('candidates, borders, both-base plot and actual CSV/TIFF downloads (trichomes with stem/PCA/global, outline, height map)');
+ {// Save session, reopen in a fresh page: same poses, merge, outline, stem, candidates and borders.
+  const key=q=>q.evaluate(()=>({poses:window.stitcherDebug().state.slices.map(s=>s.pose),joints:window.stitcherDebug().state.joints,merge:window.stitcherDebug().merged?.key,stem:window.postDebug().stem?.key,peaks:window.postDebug().peaks?.key,borders:window.postDebug().borders?.key,area:window.postDebug().leafArea?.flat_mm2}));
+  const before=await key(p),got=p.waitForEvent('download');await p.locator('#saveSession').click();const file=await got;const saved=path.join(out,'session.json');await file.saveAs(saved);
+  const q=await browser.newPage({viewport:{width:1280,height:800}});q.setDefaultTimeout(240000);q.on('pageerror',e=>errors.push(e.message));await q.goto(url);
+  const chooser=q.waitForEvent('filechooser');await q.locator('#openSession').click();await (await chooser).setFiles(saved);
+  await q.waitForFunction(()=>!window.sessionDebug().busy&&/^Open(ed| failed)/.test(window.sessionDebug().status));
+  assert.deepEqual((await q.evaluate(()=>window.sessionDebug())).report?.differences,[]);assert.deepEqual(JSON.parse(JSON.stringify(await key(q))),JSON.parse(JSON.stringify(before)));await q.close();
+  checks.push('session save and reopen in a fresh page with identical results');}
  await p.locator('aside').evaluate(e=>e.scrollTop=0);await p.screenshot({path:path.join(out,'workflow-1280.png')});
  fs.writeFileSync(path.join(out,'state.json'),JSON.stringify(await p.evaluate(()=>({slice:window.stitcherDebug(),post:window.postDebug()}))));
  assert.equal(await p.locator('#error').textContent(),'');assert.deepEqual(errors,[]);

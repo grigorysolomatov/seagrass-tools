@@ -2,7 +2,7 @@
 
 Local browser tools for exploratory stitching and measurement of user-provided GelSight height-map scans. Inputs stay read-only; derived masks, curves and arrays live in a separate cache. This repository contains code and synthetic-fixture generators, **not research scans or results**.
 
-**No setup persistence:** refreshing or closing the tab loses the loaded composition, manual placement and in-session history. Download your CSVs before closing. A disk cache is not a saved session.
+**Save your work with Save session** (top right). Refreshing or closing the tab otherwise loses the loaded composition, manual placement and in-session history; a disk cache is not a saved session. See *Saving and reopening a session* below.
 
 **Research prototype, not anatomical validation.** Prepared foreground is an experimental mask; a fitted stem is a geometric reference; detected maxima are trichome *candidates*. No automatic height leveling or anatomical classification is performed. Candidate counts per mm² of leaf area are a convenience ratio of candidates, not a validated trichome density.
 
@@ -73,6 +73,20 @@ All referenced files must resolve inside that scan folder. Canonical paths and s
 7. **Candidates.** Median window 101 px and detection window 21 px are separate odd native-grid widths. Median histogram precision defaults to 12 bits; this is approximation precision, not source bit depth. Residual is signed raw height minus median. Only full finite windows survive. One deterministic representative per tied regional maximum; no amplitude/area filter. Optional draggable size guides start near A. Temporary median/residual previews do not change science.
 8. **Leaf borders.** First normal-ray exit from connected prepared support at arclength samples. Optional raw-height cutoff is off; inward margin is zero. Neither affects detector arrays. Inspect gaps; profiles are solid but never intentionally bridge missing support.
 9. **Plot & export.** Move/resize the plot, Fit, pan/zoom and hover; click a candidate to identify it in the workspace. Bright axes show mm, signed distance and zero. Plot and CSV share numerical tables. Pick what to save in **Export** (trichome positions, leaf borders, leaf area, leaf outline, height map), adjust the filename and press **Download**; the hint under the button says what is still missing. The browser chooses the destination, not the server. See [Exports](#exports).
+
+### Saving and reopening a session
+
+**Save session** (top right) downloads a small JSON file (about 10 kB for three scans). **Open session…** loads one in any browser tab, on this computer or another with the same scans, and continues from there. The file describes how the slices relate, not results:
+
+- each scan folder, relative to the data root, with the size and SHA-256 of every input file (TMD, thumbnail, `scan.yaml`, calibration, flatfield and the six acquisition images);
+- slice order, angle, mirrors, swapped ends, per-slice Top %/Degree overrides, mask settings and Initial join spacing;
+- hand-drawn stems (point lists) and edited slice curves (Bézier handles);
+- the exact slice poses and joint corrections after Align (restored as they are, not re-aligned);
+- leaf outline edits (smoothing and redrawn sections);
+- steps 6–9 settings (combined Top %/Degree, edited combined curve, windows, histogram bits, border options, leaf base, export choice and filenames) and which stages were current;
+- headline numbers (merged grid, leaf area, combined stem, candidate and border counts) to check the reopened result.
+
+Opening checks every file first. A missing folder or a changed, missing or different-size file stops with a message naming the scan and file; nothing is loaded. A moved scan folder is found by its name anywhere up to three levels under the data root. Open then reruns the steps that were current when saved (background, slice stems, Merge, outline, leaf area, combined stem, candidates, borders) with a spinner and phase in the header, and reports *results match the saved session* or names any result that differs. With a warm cache this takes seconds; on a fresh computer it takes as long as running the steps (about 3 minutes for three 16 MP scans). Undo history starts fresh. Opening replaces the slices in the tab after confirmation. The file contains folder and file names, so treat it like the scans themselves.
 
 ### Top-percentage semantics
 
