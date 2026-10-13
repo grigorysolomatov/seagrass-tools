@@ -219,7 +219,11 @@ export function postMerge({get,api,image,images,draw,error}){
  let stem=null,residual=null,peaks=null,points=new Int32Array(),busy='',failure='',stemGeneration=0,detectionGeneration=0;
  const mergeCurrent=()=>{const g=get();return g.merged&&g.mergeRevision===g.revision&&!g.merging;};
  const baseCurrent=r=>!!(r&&mergeCurrent()&&r.merge_key===get().merged.key&&r.revision===get().revision);
- const stemCurrent=()=>baseCurrent(stem)&&stem.parameters.top===value('stemTop')&&stem.parameters.degree===value('stemDegree');
+ // Hand-drawn slice stems are inputs of the combined stem: any change makes it stale.
+ // Only slices in the current merge count (the server rejects others).
+ const mergedHand=()=>{const g=get(),paths=new Set((g.merged?.sources||[]).map(x=>x.path));return Object.fromEntries(Object.entries(g.hand||{}).filter(([p])=>paths.has(p)));};
+ const handKey=h=>JSON.stringify(Object.entries(h||{}).sort());
+ const stemCurrent=()=>baseCurrent(stem)&&stem.parameters.top===value('stemTop')&&stem.parameters.degree===value('stemDegree')&&handKey(stem.parameters.hand)===handKey(mergedHand());
  const residualCurrent=()=>baseCurrent(residual)&&residual.parameters.window===value('medianWindow')&&residual.parameters.bits===value('medianBits');
  const peaksCurrent=()=>baseCurrent(peaks)&&residualCurrent()&&peaks.parameters.residual_key===residual.key&&peaks.parameters.window===value('peakWindow');
  const connectionsCurrent=()=>!!(connections&&stemCurrent()&&peaksCurrent()&&connections.stem_key===stem.key&&connections.peaks_key===peaks.key);
@@ -254,8 +258,8 @@ export function postMerge({get,api,image,images,draw,error}){
   $('computeCandidates').disabled=!!busy||!m||!s||!valid(['medianWindow','medianBits','peakWindow']);
   $('computeStem').textContent=busy==='stem'?'Fitting merged stem…':'Fit merged stem';
   $('computeCandidates').textContent=busy==='residual'?'Computing median…':busy==='peaks'?'Finding central maxima…':'Compute candidates';
-  $('stemStatus').textContent=curveBusy?'Validating manual curve…':busy==='stem'?'Selecting raw top % independently in each prepared slice…':failure.startsWith('stem:')?'Failed · '+failure.slice(5):!m?'Merge first (step 5).':s?`${stem.fit.manual?'Manual':'Automatic'} · ${stem.fit.selected_pixels.toLocaleString()} observations · per slice ${stem.fit.sources.map(s=>s.selected_pixels.toLocaleString()).join(' / ')} · ${stem.segments} sections${stem.fit.clipped?' · requested ends outside tissue; geometry clipped':''}`:stem?'Stale · fit merged stem again.':'One curve from the top % of EACH prepared slice.';
-  $('stemStatus').title=s?stem.fit.sources.map((v,i)=>`Slice ${i+1}: ${v.selected_pixels} / ${v.valid_pixels} (${v.selected_percent.toFixed(3)}%), raw cutoff ${v.cutoff_mm.toPrecision(7)} mm`).join('\n'):'';
+  $('stemStatus').textContent=curveBusy?'Validating manual curve…':busy==='stem'?'Selecting raw top % independently in each prepared slice…':failure.startsWith('stem:')?'Failed · '+failure.slice(5):!m?'Merge first (step 5).':s?`${stem.fit.manual?'Manual':'Automatic'} · ${stem.fit.selected_pixels.toLocaleString()} observations · per slice ${stem.fit.sources.map(s=>s.selected_pixels.toLocaleString()+(s.hand?' (hand-drawn)':'')).join(' / ')} · ${stem.segments} sections${stem.fit.clipped?' · requested ends outside tissue; geometry clipped':''}`:stem?'Stale · fit merged stem again.':(Object.keys(mergedHand()).length?'One curve from the top % of each prepared slice; hand-drawn slices use their line.':'One curve from the top % of EACH prepared slice.');
+  $('stemStatus').title=s?stem.fit.sources.map((v,i)=>`Slice ${i+1}: `+(v.hand?`hand-drawn line, ${v.hand_points} points, sampled at ${v.selected_pixels} equally spaced observations (the slice's Top % count)`:`${v.selected_pixels} / ${v.valid_pixels} (${v.selected_percent.toFixed(3)}%), raw cutoff ${v.cutoff_mm.toPrecision(7)} mm`)).join('\n'):'';
   $('candidateStatus').textContent=busy==='residual'?'Median background, then centered maxima…':busy==='peaks'?'Finding centered maxima…':failure.startsWith('detection:')?'Failed · '+failure.slice(10):!m?'Merge first (step 5).':p?`Current · ${peaks.count.toLocaleString()} candidates · ${residual.quantization.bits}-bit median (bin ${residual.quantization.bin_width_mm.toPrecision(3)} mm)` :!s?'Fit current merged stem first.':peaks?'Stale candidates · '+(r?'median retained; compute peaks again.':'compute median and peaks again.'):'Ready · median subtraction then centered maximum.';
   $('windowHint').textContent='';$('windowHint').title=m?`Native grid: median ${(value('medianWindow')*g.merged.spacing_mm[0]).toFixed(3)} mm; detection ${(value('peakWindow')*g.merged.spacing_mm[0]).toFixed(3)} mm. Edge exclusion radius ${(value('medianWindow')-1)/2+(value('peakWindow')-1)/2} px.`:'';
   if(!r)diagnosticPreview='';
@@ -285,7 +289,7 @@ export function postMerge({get,api,image,images,draw,error}){
  async function fit(){
   if($('computeStem').disabled)return;
   const g=get(),revision=g.revision,generation=stemGeneration,key=g.merged.key;
-  const payload={merge_key:key,top:value('stemTop'),degree:value('stemDegree')};busy='stem';failure='';error();status();const job=beginBusy('Fitting merged stem',{buttons:['computeStem'],hints:['stemStatus']});
+  const hand=mergedHand(),payload={merge_key:key,top:value('stemTop'),degree:value('stemDegree'),...(Object.keys(hand).length?{hand}:{})};busy='stem';failure='';error();status();const job=beginBusy('Fitting merged stem',{buttons:['computeStem'],hints:['stemStatus']});
   try{const r=await assets(await api('/api/post/stem',payload));
    if(get().revision!==revision||get().merged?.key!==key||generation!==stemGeneration)throw Error('Discarded: setup or stem settings changed. Fit again.');
    if(stem&&stem.revision===revision){curvePast.push(stem);curveFuture=[];}else{curvePast=[];curveFuture=[];}stem={...r,revision};automaticStem=stem;automaticStems.set(stem.key,stem);stemGeneration++;diagnosticPreview='';$('mode').value='merged';await connect();

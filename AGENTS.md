@@ -16,6 +16,7 @@ This is a trusted-local scientific prototype, not a public service. Use `launch.
 - `merge.py`: raw maximum mosaic on a physical grid.
 - `postmerge.py`: per-source combined fit, tiled quantized median and residual maxima.
 - `curve_edit.py` / `.mjs`: exact polynomial/Bernstein conversion, clipping, manual handles.
+- `hand_stem.py` / `.mjs`: hand-drawn slice stems (native polyline). Align uses its ends/end-segment tangents; the combined stem replaces that slice's top-% cohort by the same count of equal-arclength samples.
 - `nearest_stem.py`: finite-interval stationary-root nearest points with directed tie ordering.
 - `area.py`: flat and 3D (slope-weighted) leaf area in mm² of a merge; native-grid foreground-only gradients, each merged cell takes the slope of its maximum-height source. Area cache depends on merge key and area/merge implementation hashes.
 - `stem_arc.py`: **shared physical arclength** for borders, candidate coordinates, CSV and plot.

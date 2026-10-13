@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 import engine
 from science import foreground_selection
 import merge
+import hand_stem
 
 ARTIFACTS=set()
 ASSETS={'curve.png','top.png','median.png','residual.png','points.bin'}
@@ -17,6 +18,9 @@ def request(kind,body):
  params={}
  if kind=='stem':
   params=dict(top=engine.number(body.get('top'),0,100,'Top %',exclusive=True),degree=engine.number(body.get('degree'),1,8,'Degree',True))
+  # Hand-drawn slice stems are part of the stem identity (and of its cache key).
+  hand=hand_stem.request_lines(body.get('hand'),json.loads((engine.CACHE/'merges'/merge_key/'meta.json').read_text())['sources'])
+  if hand:params['hand']=hand
  elif kind=='residual':
   params=dict(window=odd(body.get('window')),bits=engine.number(body.get('bits',12),1,16,'Bits',True))
  else:
@@ -25,6 +29,7 @@ def request(kind,body):
   prior=json.loads((engine.CACHE/'postmerge'/params['residual_key']/'meta.json').read_text())
   if prior['kind']!='residual' or prior['merge_key']!=merge_key:raise ValueError('Residual belongs to another merge')
  deps=dict(kind=kind,merge_key=merge_key,parameters=params,algorithm_sha256=engine.digest(engine.HERE/'postmerge.py'),selection_sha256=engine.digest(engine.HERE/'science.py'))
+ if params.get('hand'):deps['hand_sha256']=engine.digest(engine.HERE/'hand_stem.py')
  key=engine.signature(deps);dest=engine.CACHE/'postmerge'/key
  mm=json.loads((engine.CACHE/'merges'/merge_key/'meta.json').read_text())
  if (dest/'meta.json').exists():
@@ -44,7 +49,7 @@ def request(kind,body):
    z=data['height_mm'];valid=data['valid_mask']&np.isfinite(z)
   if z.size>80_000_000:raise ValueError('Post-merge processing limited to 80 million cells')
   if kind=='stem':
-   points,source_stats=source_cohort(mm,params['top'])
+   points,source_stats=source_cohort(mm,params['top'],hand=params.get('hand'))
    fit,selected,segments=stem_fit(z,valid,params['top'],params['degree'],points=points,source_stats=source_stats)
    h,w=z.shape;size=(max(1,round(w*min(1,1800/max(w,h)))),max(1,round(h*min(1,1800/max(w,h)))))
    alpha=Image.fromarray(selected.astype(np.uint8)*200)
@@ -122,8 +127,15 @@ def select_source_points(z,mask,pose,grid,percent):
  points=(np.column_stack((cols,rows))@a.T+t-np.asarray(grid['origin_center_mm']))/np.asarray(grid['spacing_mm'])
  return points,selection
 
-def source_cohort(meta,percent,validate_only=False):
- """Read the immutable sources/masks/poses of THIS merge, not UI fit settings."""
+def to_grid(xy,pose,grid):
+ a,t=merge.validate_pose(pose)
+ return (np.asarray(xy,float)@a.T+t-np.asarray(grid['origin_center_mm']))/np.asarray(grid['spacing_mm'])
+
+def source_cohort(meta,percent,validate_only=False,hand=None):
+ """Read the immutable sources/masks/poses of THIS merge, not UI fit settings.
+
+ A slice with a hand-drawn stem contributes the same NUMBER of observations as
+ its Top % cohort would, placed at equal arclength along its line instead."""
  batches=[];stats=[];total=0
  for source in meta['sources']:
   folder,scan,cal,files,height=engine.inspect_source(source['path'])
@@ -138,6 +150,9 @@ def source_cohort(meta,percent,validate_only=False):
   with Image.open(md/'mask.png') as im:mask=np.asarray(im)>0
   if list(z.shape)!=source['shape'] or mask.shape!=z.shape:raise ValueError('Source/mask dimensions changed')
   points,stat=select_source_points(z,mask,source['pose'],meta,percent)
+  if hand and source['path'] in hand:
+   line=hand[source['path']];points=to_grid(hand_stem.samples(line,max(2,len(points))),source['pose'],meta)
+   stat={**stat,'hand':True,'hand_points':len(line),'population':'hand-drawn line; equal-arclength samples, count = Top % cohort'}
   total+=len(points)
   if total>5_000_000:raise ValueError('Stem fit exceeds 5 million selected pixels; reduce Top %')
   batches.append(points);stats.append({**source,**stat})

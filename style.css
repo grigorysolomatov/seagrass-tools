@@ -61,3 +61,4 @@ button.busy[data-progress]:not([data-progress=""])::after{content:' · ' attr(da
 #activity{display:flex;gap:14px;color:#fff}#activity .activityItem{display:inline-flex;align-items:center;white-space:nowrap}
 body.working #status{color:#888}
 @media (prefers-reduced-motion:reduce){.spinner,button.busy::before,.hint.working::before,#plotStatus.working::before{animation-duration:2.4s}}
+#handStemSettings .fitRow{gap:6px}#handStemSettings .fitRow button{flex:1;padding:4px 6px;font-size:11px}#handStemSettings .block{margin-top:6px}

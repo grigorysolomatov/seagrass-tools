@@ -11,6 +11,7 @@
 !leaf_borders.py
 !csv_exports.py
 !curve_edit.py
+!hand_stem.py
 !stem_arc.py
 !area.py
 !server.py
@@ -19,6 +20,7 @@
 !model.mjs
 !blend.mjs
 !curve_edit.mjs
+!hand_stem.mjs
 !plot.mjs
 !index.html
 !style.css
