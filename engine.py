@@ -193,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   try:
    u=urlparse(self.path)
-   if u.path=='/api/health':return self.respond(200,{'status':'ok'})
+   if u.path=='/api/health':return self.respond(200,{'status':'ok','workers':WORKERS})
    if u.path=='/api/status':return self.respond(200,STATE)
    if u.path=='/api/browse':
     path=safe_path(parse_qs(u.query).get('path',[str(DEFAULT)])[0]);entries=[]

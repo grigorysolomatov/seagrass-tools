@@ -9,6 +9,8 @@ const images=new Map(),fits=new Map(),pendingFits=new Map(),maskedHeights=new Ma
 let selected=null,loading=false,aligning=false,masking=false,preparing=0,previewTimer=null,dragId=null,selectedJoint=0,showSource=false;
 let merging=false,merged=null,mergeRevision=-1,mergeError='';
 let computingStems=false,curveBusy=false,sliceGesture=null;
+// Per-slice job badges for steps 2-3; results stream into the workspace as each slice finishes.
+const sliceJobs=new Map();let streamState=null,workerLimit=null;
 let camera={scale:20,x:30,y:70},layers={highlight:false,curve:false};
 const name=s=>s.path.split('/').pop(),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const parameters=state=>({...state.background,enabled:true});
@@ -18,6 +20,21 @@ const stemsReady=()=>ready()&&store.state.slices.every(s=>result(s));
 const maskKey=(s,state=store.state)=>JSON.stringify([s.id,parameters(state)]);
 const maskResult=s=>store.state.background.enabled?masks.get(maskKey(s)):null;
 const ready=()=>!!store.state.slices.length&&store.state.background.enabled&&store.state.slices.every(s=>maskResult(s));
+// Display-only: slices already finished in a running step, before the whole step commits.
+const liveMask=s=>ready()?maskResult(s):masking&&streamState?masks.get(maskKey(s,streamState))||null:null;
+const liveResult=s=>{const r=ready()?result(s):null;if(r||!computingStems||!streamState)return r;const key=fitKey(s,streamState);return key===fitKey(s)?fits.get(key)||null:null;};
+async function workers(){if(workerLimit)return workerLimit;try{workerLimit=Math.max(1,Math.min(8,(await api('/api/health')).workers||1));}catch{workerLimit=1;}return workerLimit;}
+// Run fn over slices with bounded concurrency; record queued/working/done/error per slice.
+async function runSlices(kind,slices,fn){
+ for(const s of slices)sliceJobs.set(s.id,{kind,state:'queued'});status();
+ const queue=[...slices],failures=[],limit=await workers();
+ await Promise.all(Array.from({length:Math.min(limit,queue.length)},async()=>{for(let s;(s=queue.shift());){sliceJobs.set(s.id,{kind,state:'working'});status();try{await fn(s);sliceJobs.set(s.id,{kind,state:'done'});}catch(e){sliceJobs.set(s.id,{kind,state:'error',message:e.message});failures.push(name(s)+': '+e.message);}status();draw();}}));
+ return failures;
+}
+// Success badges clear when the step commits; failures stay on their card until retried.
+function clearJobs(kind){for(const [id,j] of sliceJobs)if(j.kind===kind&&j.state!=='error')sliceJobs.delete(id);}
+function jobCount(kind){const j=[...sliceJobs.values()].filter(j=>j.kind===kind);return `${j.filter(j=>j.state==='done'||j.state==='error').length}/${j.length}`;}
+function jobBadge(id){const j=sliceJobs.get(id);if(!j)return '';const what=j.kind==='mask'?'background':'stem';return j.state==='queued'?`<span class="sliceJob queued">waiting · ${what}</span>`:j.state==='working'?`<span class="sliceJob working"><i class="sliceSpin" aria-hidden="true"></i>${j.kind==='mask'?'removing background':'fitting stem'}</span>`:j.state==='done'?`<span class="sliceJob done">✓ ${what}</span>`:`<span class="sliceJob failed" title="${esc(j.message||'')}">✕ ${what} failed</span>`;}
 const setupKey=(st=store.state)=>JSON.stringify([st.slices.map(s=>[fitKey(s,st),s.manualResult?.key,s.reverse,s.angle,s.mirrorH,s.mirrorV]),st.shared.overlap]);
 const stale=()=>store.state.aligned&&store.state.alignedSetup!==setupKey();
 function error(s=''){$('error').textContent=s;}
@@ -28,8 +45,8 @@ function status(){
  const s=store.state,ok=ready(),busy=loading||masking||aligning||computingStems||curveBusy;
  const chosen=s.slices.find(s=>s.id===selected),current=chosen&&result(chosen);
  $('computeSliceStems').disabled=busy||!ok;
- $('computeSliceStems').textContent=computingStems?'Computing slice stems…':'Compute slice stems';
- $('sliceStemStatus').textContent=computingStems?'Fitting native curves · placement unchanged.':!ok?'Remove background first.':!stemsReady()?'Compute automatic stems; placement stays unchanged.':current?.fit.clipped?'Manual handle outside tissue · displayed curve clipped to foreground.':current?.fit.manual?'Manual curve · placement unchanged until Align.':'Current automatic stems · optional handle editing.';
+ $('computeSliceStems').textContent=computingStems?`Computing slice stems · ${jobCount('fit')}`:'Compute slice stems';$('computeSliceStems').classList.toggle('working',computingStems);
+ $('sliceStemStatus').textContent=computingStems?`Fitting stems · ${jobCount('fit')} slices done · each curve appears as it finishes.`:!ok?'Remove background first.':!stemsReady()?'Compute automatic stems; placement stays unchanged.':current?.fit.clipped?'Manual handle outside tissue · displayed curve clipped to foreground.':current?.fit.manual?'Manual curve · placement unchanged until Align.':'Current automatic stems · optional handle editing.';
  $('editSliceCurve').disabled=busy||!current||$('mode').value==='merged';
  $('resetSliceCurve').hidden=!$('editSliceCurve').checked;
  $('resetSliceCurve').disabled=busy||!current?.fit.manual;
@@ -38,19 +55,19 @@ function status(){
  $('merge').textContent=merging?'Merging raw heights…':merged?'Merge again':'Merge maximum heights';
  $('mode').querySelector('[value=merged]').disabled=!merged;
  $('mergeStatus').textContent=merging?'Computing raw foreground maximum… Edits will discard this run.':mergeError?'Merge failed · '+mergeError:mergeStale?'Stale · setup edited. Merge again; slices remain editable.':merged?`Current · ${merged.dimensions.join(' × ')} · ${merged.spacing_mm[0].toPrecision(4)} mm/pixel · max of raw heights`:!ok||!s.aligned?'Prepare and align first.':'Ready · max of raw foreground heights on one physical grid.';
- for(const card of $('slices').children){const item=s.slices[+card.dataset.index];if(item)card.querySelector('small').textContent=`${item.angle}°${item.reverse?' · ends swapped':''}`;}
+ for(const card of $('slices').children){const item=s.slices[+card.dataset.index];if(item){card.querySelector('small').textContent=`${item.angle}°${item.reverse?' · ends swapped':''}`;const badge=jobBadge(item.id),box=card.querySelector('.sliceJobBox');if(box&&box.dataset.html!==badge){box.dataset.html=badge;box.innerHTML=badge;}}}
  $('undo').disabled=busy||(!store.past.length&&!store.pending);$('redo').disabled=busy||!store.future.length;
  $('add').disabled=busy;$('add').classList.toggle('accent',!s.slices.length);$('load').disabled=loading;
  $('align').disabled=busy||!stemsReady()||s.slices.length<2;
  $('align').textContent=aligning?'Aligning…':s.aligned?'Align again · reset refinements':'Align leaf ends';
  $('align').classList.toggle('accent',ok&&!s.aligned||stale());
  $('prepareBackground').disabled=busy||!s.slices.length||ok;
- $('prepareBackground').textContent=masking?'Removing background…':ok?'Background removed ✓':'Remove background';
+ $('prepareBackground').classList.toggle('working',masking);$('prepareBackground').textContent=masking?`Removing background · ${jobCount('mask')}`:ok?'Background removed ✓':'Remove background';
  $('prepareBackground').classList.toggle('accent',!ok&&!!s.slices.length);
  $('count').textContent=s.slices.length;
- $('maskStatus').textContent=masking?'Preparing leaf boundaries… Keep this page open.':!s.slices.length?'Load scans first.':ok?'Ready · Inspect the cut-out before Align.':s.background.enabled?'Mask settings changed. Remove background again; placement retained.':'Required before Align.';
+ $('maskStatus').textContent=masking?`Removing background · ${jobCount('mask')} slices done · each cut-out appears as it finishes.`:!s.slices.length?'Load scans first.':ok?'Ready · Inspect the cut-out before Align.':s.background.enabled?'Mask settings changed. Remove background again; placement retained.':'Required before Align.';
  for(const k of ['curve','highlight']){$(k).disabled=!ok||$('mode').value==='merged';setHelp($(k),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'First remove background in step 2.');}
- $('source').disabled=!ok||$('mode').value==='merged';$('source').checked=!ok||showSource;
+ $('source').disabled=!ok||$('mode').value==='merged';$('source').checked=(!ok&&!masking)||showSource;
  setHelp($('source'),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'Original background is shown until step 2 is complete.');
  $('alignmentStatus').textContent=!ok?'First remove background in step 2.':!stemsReady()?'Compute current slice stems in step 3.':s.slices.length<2?'Load at least two slices to join.':stale()?'Setup changed · placement retained. Align again when ready.':s.aligned?'Aligned · refine the selected joint.':'Inspect stems, then Align.';
  $('empty').hidden=!!s.slices.length;
@@ -73,7 +90,7 @@ function renderSide(){
  const state=store.state;
  for(const k of ['threshold','closing','core','halo','iterations'])$('bg-'+k).value=state.background[k];
  for(const [id,k] of [['sharedTop','top'],['sharedDegree','degree'],['sharedOverlap','overlap']])$(id).value=state.shared[k];
- $('slices').innerHTML=state.slices.map((s,i)=>`<div class="card ${s.id===selected?'selected':''}" data-index="${i}" draggable="true" tabindex="0" role="button" aria-label="Select slice ${i+1}" title="${esc(s.path)}"><div class="cardName"><b>${i+1}</b>${esc(name(s))}</div><small>${s.angle}°${s.reverse?' · ends swapped':''}</small><div class="cardControls"><button class="remove" aria-label="Remove slice ${i+1}">Remove</button><button class="up" aria-label="Move slice ${i+1} up" ${i===0?'disabled':''}>↑</button><button class="down" aria-label="Move slice ${i+1} down" ${i===state.slices.length-1?'disabled':''}>↓</button></div></div>`).join('');
+ $('slices').innerHTML=state.slices.map((s,i)=>`<div class="card ${s.id===selected?'selected':''}" data-index="${i}" draggable="true" tabindex="0" role="button" aria-label="Select slice ${i+1}" title="${esc(s.path)}"><div class="cardName"><b>${i+1}</b>${esc(name(s))}</div><small>${s.angle}°${s.reverse?' · ends swapped':''}</small><div class="sliceJobBox" aria-live="polite"></div><div class="cardControls"><button class="remove" aria-label="Remove slice ${i+1}">Remove</button><button class="up" aria-label="Move slice ${i+1} up" ${i===0?'disabled':''}>↑</button><button class="down" aria-label="Move slice ${i+1} down" ${i===state.slices.length-1?'disabled':''}>↓</button></div></div>`).join('');
  for(const card of $('slices').children){const i=+card.dataset.index,s=state.slices[i];const select=()=>selectSlice(s.id);card.onclick=e=>{if(!e.target.closest('button'))select();};card.onkeydown=e=>{if(e.key==='Enter')select();};card.querySelector('.up').onclick=()=>edit(st=>reorder(st,i,i-1));card.querySelector('.down').onclick=()=>edit(st=>reorder(st,i,i+1));card.querySelector('.remove').onclick=()=>edit(st=>{st.slices.splice(i,1);arrange(st);});card.ondragstart=()=>dragId=s.id;card.ondragover=e=>e.preventDefault();card.ondrop=e=>{e.preventDefault();edit(st=>reorder(st,st.slices.findIndex(s=>s.id===dragId),i));};}
  const index=state.slices.findIndex(s=>s.id===selected),s=state.slices[index];$('inspector').hidden=!s;if(!s)$('sliceFit').innerHTML='';
  if(s){const values=effective(state,s);$('inspector').innerHTML=`<h3>Slice ${index+1}</h3><label class="field">Angle ° <input id="angle" type="number" min="-3600" max="3600" step="any" value="${s.angle}"></label><input id="angleSlider" aria-label="Rotation slider" type="range" min="-180" max="180" step=".1" value="${s.angle}"><label><input id="mirrorH" type="checkbox" ${s.mirrorH?'checked':''}> Mirror H</label> <label><input id="mirrorV" type="checkbox" ${s.mirrorV?'checked':''}> Mirror V</label><label class="block"><input id="reverse" type="checkbox" ${s.reverse?'checked':''}> Swap incoming / outgoing ends</label>`; $('sliceFit').innerHTML=`<h3>Slice ${index+1} fit</h3>${['top','degree'].map(k=>`<div class="field"><label for="local-${k}">${k==='top'?'Top %':'Degree'}</label><input id="local-${k}" type="number" min="${k==='top'?'.001':'1'}" max="${k==='top'?'100':'8'}" step="${k==='top'?'any':'1'}" value="${values[k]}" ${s[k+'Locked']?'disabled':''}><button id="lock-${k}">${s[k+'Locked']?'Locked':'Unlocked'}</button></div>`).join('')}<div class="fitinfo">Native ${s.dimensions.join(' × ')} pixels<br>Height display ${s.height_range_mm.map(v=>v.toFixed(4)).join(' … ')} mm<br>Black = minimum; white = maximum, per slice.</div>`;
@@ -117,18 +134,20 @@ async function computeSliceStems(){
  if(computingStems||curveBusy||!ready())return;
  store.end();if([...$('alignmentStep').querySelectorAll('input[type=number]:not(:disabled)')].some(e=>!e.validity.valid||e.value==='')){error('Correct stem parameters first.');return;}
  const snapshot=structuredClone(store.state),revision=store.revision;computingStems=true;error();status();
- try{await Promise.all(snapshot.slices.map(s=>prepare(s,snapshot)));if(revision!==store.revision)throw Error('Setup changed; compute again.');store.edit(st=>{for(const s of st.slices){s.computedFitKey=fitKey(s,st);delete s.manualResult;}});layers.curve=true;$('curve').checked=true;refresh();}
- catch(e){error('Stem computation failed: '+e.message);}finally{computingStems=false;status();}
+ streamState=snapshot;layers.curve=true;$('curve').checked=true;
+ try{const failures=await runSlices('fit',snapshot.slices,s=>prepare(s,snapshot));if(failures.length)throw Error(failures.join(' · '));if(revision!==store.revision)throw Error('Setup changed; compute again.');store.edit(st=>{for(const s of st.slices){s.computedFitKey=fitKey(s,st);delete s.manualResult;}});clearJobs('fit');layers.curve=true;$('curve').checked=true;refresh();}
+ catch(e){error('Stem computation failed: '+e.message);}finally{computingStems=false;streamState=null;status();draw();}
 }
 async function removeBackground(){
  if(masking||loading||aligning||!store.state.slices.length)return;
  store.end();if([...$('backgroundStep').querySelectorAll('input')].some(e=>!e.validity.valid||e.value==='')){error('Correct mask parameters before removing background.');return;}
  const snapshot=structuredClone(store.state),revision=store.revision;masking=true;error();status();
- try{await Promise.all(snapshot.slices.map(s=>prepareMask(s,snapshot)));
+ streamState=snapshot;showSource=false;
+ try{const failures=await runSlices('mask',snapshot.slices,s=>prepareMask(s,snapshot));if(failures.length)throw Error(failures.join(' · '));
  if(revision!==store.revision){error('Setup changed during preparation. Press Remove background again.');return;}
- store.edit(st=>{st.background.enabled=true;});showSource=false;refresh();
+ store.edit(st=>{st.background.enabled=true;});showSource=false;clearJobs('mask');refresh();
  }catch(e){error('Background removal failed; placement retained. Check mask parameters and retry. '+e.message);}
- finally{masking=false;status();}
+ finally{masking=false;streamState=null;status();draw();}
 }
 async function doMerge(){
  if(merging||loading||aligning||masking||!ready()||!store.state.aligned)return;
@@ -160,12 +179,12 @@ function draw(){const ratio=devicePixelRatio||1,w=canvas.clientWidth,h=canvas.cl
  $('scale').textContent=camera.scale.toFixed(1)+' px/mm';status();return;
  }
  if($('mode').value==='photo'){
-  const items=store.state.slices.map(s=>{const m=ready()&&!$('source').checked?maskResult(s):null,url=m?m.assets.photo:s.assets.photo;return {...s,url,image:images.get(url)};}).filter(s=>s.image);
+  const items=store.state.slices.map(s=>{const m=!$('source').checked?liveMask(s):null,url=m?m.assets.photo:s.assets.photo;return {...s,url,image:images.get(url)};}).filter(s=>s.image);
   const blended=photoBlend.get(items);if(blended){const sc=ratio*camera.scale;ctx.setTransform(sc,0,0,sc,ratio*camera.x,ratio*camera.y);ctx.drawImage(blended.canvas,...blended.lo,...blended.extent);}
  }
- for(const s of store.state.slices){const A=s.pose.matrix,r=ready()?result(s):null,m=ready()?maskResult(s):null,displayMask=$('source').checked?null:m,sc=ratio*camera.scale;ctx.setTransform(sc*A[0][0],sc*A[1][0],sc*A[0][1],sc*A[1][1],ratio*(camera.x+camera.scale*s.pose.shift[0]),ratio*(camera.y+camera.scale*s.pose.shift[1]));const base=$('mode').value==='height'?heightImage(s,displayMask):null;if(base)ctx.drawImage(base,0,0,...s.dimensions);if(r&&layers.highlight){ctx.imageSmoothingEnabled=false;ctx.drawImage(images.get(r.assets.improved.highlight),-.5,-.5,...s.dimensions);ctx.imageSmoothingEnabled=true;}if(r&&(layers.curve||($('editSliceCurve').checked&&s.id===selected))){ctx.setTransform(ratio,0,0,ratio,0,0);const map=p=>screen(transformed(s,p));paintCurve(ctx,r,map,{preview:sliceGesture?.slice.id===s.id?sliceGesture.handles:null});}}
+ for(const s of store.state.slices){const A=s.pose.matrix,r=liveResult(s),m=liveMask(s),displayMask=$('source').checked?null:m,sc=ratio*camera.scale;ctx.setTransform(sc*A[0][0],sc*A[1][0],sc*A[0][1],sc*A[1][1],ratio*(camera.x+camera.scale*s.pose.shift[0]),ratio*(camera.y+camera.scale*s.pose.shift[1]));const base=$('mode').value==='height'?heightImage(s,displayMask):null;if(base)ctx.drawImage(base,0,0,...s.dimensions);if(r&&layers.highlight){ctx.imageSmoothingEnabled=false;ctx.drawImage(images.get(r.assets.improved.highlight),-.5,-.5,...s.dimensions);ctx.imageSmoothingEnabled=true;}if(r&&(layers.curve||($('editSliceCurve').checked&&s.id===selected))){ctx.setTransform(ratio,0,0,ratio,0,0);const map=p=>screen(transformed(s,p));paintCurve(ctx,r,map,{preview:sliceGesture?.slice.id===s.id?sliceGesture.handles:null});}}
  ctx.setTransform(ratio,0,0,ratio,0,0);for(const [i,s] of store.state.slices.entries()){const p=corners(s).map(screen);ctx.strokeStyle=s.id===selected?'#ff0088':'#ffffff';ctx.lineWidth=s.id===selected?3:1;ctx.beginPath();p.forEach((v,i)=>i?ctx.lineTo(...v):ctx.moveTo(...v));ctx.closePath();ctx.stroke();const [x,y]=p[0];ctx.fillStyle=s.id===selected?'#ff0088':'#fff';ctx.fillRect(x,y,24,21);ctx.fillStyle='#000';ctx.font='bold 12px system-ui';ctx.fillText(String(i+1),x+7,y+15);}
- if(layers.curve&&ready())for(const [si,s] of store.state.slices.entries()){const r=result(s);if(!r)continue;for(const [i,p] of r.geometry.ends.entries()){const q=screen(transformed(s,p)),incoming=s.reverse?i===1:i===0;ctx.fillStyle=incoming?'#00ffc8':'#ff0088';ctx.beginPath();ctx.arc(...q,4,0,Math.PI*2);ctx.fill();ctx.font='11px system-ui';if(!store.state.aligned||(incoming?si===0:si===store.state.slices.length-1))ctx.fillText(incoming?'in':'out',q[0]+7,q[1]-7);}}
+ if(layers.curve&&(ready()||computingStems))for(const [si,s] of store.state.slices.entries()){const r=liveResult(s);if(!r)continue;for(const [i,p] of r.geometry.ends.entries()){const q=screen(transformed(s,p)),incoming=s.reverse?i===1:i===0;ctx.fillStyle=incoming?'#00ffc8':'#ff0088';ctx.beginPath();ctx.arc(...q,4,0,Math.PI*2);ctx.fill();ctx.font='11px system-ui';if(!store.state.aligned||(incoming?si===0:si===store.state.slices.length-1))ctx.fillText(incoming?'in':'out',q[0]+7,q[1]-7);}}
  for(const [i,j] of store.state.joints.entries()){const p=screen(j.pivot);ctx.beginPath();ctx.arc(...p,5,0,Math.PI*2);ctx.strokeStyle=i===selectedJoint?'#ff0088':'#fff';ctx.lineWidth=2;ctx.stroke();if(layers.curve){ctx.fillStyle='#fff';ctx.font='11px system-ui';ctx.fillText(`${i+1}→${i+2}`,p[0]+8,p[1]-9);}}
  post.paintOverlays(ctx,ratio,camera);
  if($('editSliceCurve').checked){const s=store.state.slices.find(s=>s.id===selected),r=s&&result(s);if(r){ctx.setTransform(ratio,0,0,ratio,0,0);paintHandles(ctx,sliceGesture?.handles||handlesFor(r),p=>screen(transformed(s,p)));}}
@@ -251,3 +270,10 @@ window.postDebug=()=>post.debug();
 new ResizeObserver(draw).observe($('stage'));
 window.stitcherDebug=()=>({state:structuredClone(store.state),selected,merging,merged,mergeRevision,mergeStale:!!merged&&mergeRevision!==store.revision,revision:store.revision,undo:store.past.length,redo:store.future.length,loading,aligning,masking,ready:ready(),stemsReady:stemsReady(),computingStems,curveBusy,editHandles:store.state.slices.find(s=>s.id===selected)&&result(store.state.slices.find(s=>s.id===selected))?handlesFor(result(store.state.slices.find(s=>s.id===selected))):null,stale:stale(),preparing,mode:$('mode').value,masks:Object.fromEntries(store.state.slices.filter(s=>maskResult(s)).map(s=>[s.id,maskResult(s)])),layers:{...layers},camera:{...camera},images:images.size,results:Object.fromEntries(store.state.slices.filter(s=>result(s)).map(s=>[s.id,result(s)]))});
 refresh();
+// Update chip: poll served frontend files; never reload (the session lives in this tab).
+(()=>{const files=['/','/app.js','/post.js','/blend.mjs','/model.mjs','/curve_edit.mjs','/plot.mjs','/style.css'];let base=null,seen=null;
+ const digest=async()=>{const parts=await Promise.all(files.map(f=>fetch(f,{cache:'no-store'}).then(r=>{if(!r.ok)throw Error(r.status);return r.arrayBuffer();})));const all=new Uint8Array(parts.reduce((n,b)=>n+b.byteLength+1,0));let o=0;for(const b of parts){all.set(new Uint8Array(b),o);o+=b.byteLength+1;}return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',all)),x=>x.toString(16).padStart(2,'0')).join('');};
+ const chip=document.createElement('div');chip.id='updateChip';chip.hidden=true;chip.setAttribute('role','status');chip.innerHTML='<span>New version available. Refresh when convenient. Download CSVs first.</span><button type="button" aria-label="Hide notice" title="Hide">×</button>';document.body.append(chip);
+ chip.querySelector('button').onclick=()=>{chip.hidden=true;};
+ const check=async()=>{if(document.hidden&&base!==null)return;try{const d=await digest();if(base===null)base=d;else if(d!==base&&d!==seen){seen=d;chip.hidden=false;}}catch{}};
+ check();setInterval(check,30000);document.addEventListener("visibilitychange",check);window.updateDebug=()=>({base,seen,shown:!chip.hidden});})();
