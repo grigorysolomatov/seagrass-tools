@@ -84,6 +84,18 @@ def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def signature(obj):return hashlib.sha256(json.dumps(obj,sort_keys=True).encode()).hexdigest()
 
 
+# Per-artifact locks: different slices compute concurrently, while two requests
+# for the same cache key (e.g. step 2 and step 3 racing) publish it only once.
+# Slices are independent and the computation is deterministic per slice (OpenCV's
+# RNG is per-thread and reseeded in masking), so results are byte-identical to
+# serial runs. WORKERS bounds parallel heavy work: each 16 MP scan needs ~0.8 GB.
+WORKERS=max(1,int(os.environ.get('SEAGRASS_WORKERS',str(min(4,os.cpu_count() or 1)))))
+WORK_SLOTS=threading.BoundedSemaphore(WORKERS)
+KEY_LOCKS={};KEY_GUARD=threading.Lock()
+def key_lock(kind,key):
+ with KEY_GUARD:return KEY_LOCKS.setdefault((kind,key),threading.Lock())
+
+
 BACKGROUND_DEFAULTS=dict(enabled=False,threshold=99,closing=4,core=16,halo=8,iterations=6)
 MASKS=set()
 def validate_background(value):
@@ -96,24 +108,28 @@ def validate_background(value):
 
 def prepare_mask(path,background):
  # This stage deliberately has no fit/clip dependency.
- from scipy import ndimage as ndi
  folder,scan,cal,files,height=inspect_source(path)
  params=validate_background(background)
  deps={'inputs':{p.name:digest(p) for p in files},'algorithm_sha256':digest(HERE/'masking.py'),'parameters':params,'seed_top':5,'asset_version':1}
  key=signature(deps);dest=CACHE/'masks'/key;dest.mkdir(parents=True,exist_ok=True)
- if not (dest/'meta.json').exists():
-  z,spacing=decode(height);h,w=z.shape
-  mask=improved_mask(folder,scan,cal,z,params)
-  Image.fromarray((mask*255).astype('uint8')).save(dest/'mask.png')
-  size=(min(1800,w),round(h*min(1800,w)/w))
-  photo=Image.open(folder/'thumbnail.jpg').convert('RGBA');photo.putalpha(Image.fromarray((mask*255).astype('uint8')))
-  photo.resize(size,Image.Resampling.LANCZOS).save(dest/'photo.png')
-  small=np.asarray(Image.fromarray((mask*255).astype('uint8')).resize(size,Image.Resampling.NEAREST))>0
-  boundary=small & ~ndi.binary_erosion(small,iterations=2)
-  outline=Image.new('RGBA',size,(0,255,200,0));outline.putalpha(Image.fromarray((boundary*255).astype('uint8')));outline.save(dest/'outline.png')
-  r=dict(key=key,provenance=deps,assets={k:f'/mask-asset/{key}/{k}.png' for k in ['photo','outline']})
-  (dest/'meta.json').write_text(json.dumps(r))
+ with key_lock('mask',key):
+  if not (dest/'meta.json').exists():
+   with WORK_SLOTS:_compute_mask(folder,scan,cal,height,params,deps,key,dest)
  MASKS.add(key);return json.loads((dest/'meta.json').read_text())
+
+def _compute_mask(folder,scan,cal,height,params,deps,key,dest):
+ from scipy import ndimage as ndi
+ z,spacing=decode(height);h,w=z.shape
+ mask=improved_mask(folder,scan,cal,z,params)
+ Image.fromarray((mask*255).astype('uint8')).save(dest/'mask.png')
+ size=(min(1800,w),round(h*min(1800,w)/w))
+ photo=Image.open(folder/'thumbnail.jpg').convert('RGBA');photo.putalpha(Image.fromarray((mask*255).astype('uint8')))
+ photo.resize(size,Image.Resampling.LANCZOS).save(dest/'photo.png')
+ small=np.asarray(Image.fromarray((mask*255).astype('uint8')).resize(size,Image.Resampling.NEAREST))>0
+ boundary=small & ~ndi.binary_erosion(small,iterations=2)
+ outline=Image.new('RGBA',size,(0,255,200,0));outline.putalpha(Image.fromarray((boundary*255).astype('uint8')));outline.save(dest/'outline.png')
+ r=dict(key=key,provenance=deps,assets={k:f'/mask-asset/{key}/{k}.png' for k in ['photo','outline']})
+ (dest/'meta.json').write_text(json.dumps(r))
 
 def process_slice(item,shared,background=None):
  folder,scan,cal,files,height=inspect_source(item['path'])
@@ -128,8 +144,14 @@ def process_slice(item,shared,background=None):
  top=shared['top'] if item['topLocked'] else item['top'];degree=int(shared['degree'] if item['degreeLocked'] else item['degree'])
  deps={'source':hashes,'mask_key':mask_key,'science_sha256':digest(HERE/'science.py'),'top':top,'degree':degree,'asset_version':4,'selection':'finite-prepared-foreground-linear-inclusive-v1'}
  key=signature(deps);dest=CACHE/'results'/key
+ with key_lock('fit',key):return _fit_slice(item,folder,height,mask_result,md,top,degree,deps,key,dest)
+
+def _fit_slice(item,folder,height,mask_result,md,top,degree,deps,key,dest):
  if (dest/'result.json').is_file():
   result=json.loads((dest/'result.json').read_text());result['path']=str(folder);result['id']=item['id'];result['cache_hit']=True;REGISTERED.add(key);return result
+ with WORK_SLOTS:return _compute_fit(item,folder,height,mask_result,md,top,degree,deps,key,dest)
+
+def _compute_fit(item,folder,height,mask_result,md,top,degree,deps,key,dest):
  z,spacing=decode(height);h,w=z.shape
  photo=Image.open(folder/'thumbnail.jpg').convert('RGB')
  if photo.size!=(w,h):raise ValueError('Photo and TMD dimensions do not match')

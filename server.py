@@ -22,7 +22,7 @@ import curve_edit
 from science import decode
 
 HERE=engine.HERE
-SCIENCE_LOCK=threading.Lock()  # OpenCV RNG and on-disk fit publication are serialized.
+SCIENCE_LOCK=threading.Lock()  # Post-merge stages are serialized; per-slice mask/fit use engine's bounded workers and per-key locks.
 LOAD_LOCK=threading.Lock()
 LOADS=set()
 
@@ -113,12 +113,12 @@ class Handler(engine.Handler):
    if self.path=='/api/load':return self.respond(200,load_slice(body['path']))
    if self.path=='/api/mask':
     params=engine.validate_background(body['background'])
-    with SCIENCE_LOCK:r=engine.prepare_mask(body['path'],params)
+    r=engine.prepare_mask(body['path'],params)  # per-slice parallel; engine bounds workers and locks per cache key
     return self.respond(200,r)
    if self.path=='/api/fit':
     top=engine.number(body['top'],0,100,'Top %',exclusive=True);degree=engine.number(body['degree'],1,8,'Degree',True)
     path=str(engine.safe_path(body['path']))
-    with SCIENCE_LOCK:r=engine.process_slice(dict(id=path,path=path,topLocked=True,degreeLocked=True),dict(top=top,degree=degree),engine.validate_background(body.get("background",{})))
+    r=engine.process_slice(dict(id=path,path=path,topLocked=True,degreeLocked=True),dict(top=top,degree=degree),engine.validate_background(body.get("background",{})))
     return self.respond(200,r)
    self.respond(404,{'error':'Not found'})
   except Exception as exc:
