@@ -5,6 +5,7 @@ import numpy as np
 from stem_arc import StemArc
 from scipy.optimize import brentq
 import engine
+import outline
 import postmerge
 from nearest_stem import curve_domain
 
@@ -34,10 +35,19 @@ def first_exit(mask, point, direction, stop_at=np.inf):
     raise ValueError('Ray traversal failed')
 
 
-def border_support(mask,z,enabled=False,cutoff=0.):
+def border_support(mask,z,enabled=False,cutoff=0.,region=None):
+    """Finite prepared foreground, or an edited outline region (outline.py), optionally cut by raw height.
+
+    With a region, cells the edit added without height data stay support; the cutoff removes only
+    measured cells below it. Without a region this is exactly the original prepared support."""
     if type(enabled) is not bool or not np.isfinite(cutoff):raise ValueError('Invalid raw-height cutoff')
-    support=np.asarray(mask,bool)&np.isfinite(z)
-    return support&(z>=cutoff) if enabled else support
+    if region is None:
+        support=np.asarray(mask,bool)&np.isfinite(z)
+        return support&(z>=cutoff) if enabled else support
+    support=np.asarray(region,bool).copy()
+    if enabled:
+        with np.errstate(invalid='ignore'):support&=~(np.isfinite(z)&(z<cutoff))
+    return support
 
 
 def controls(body):
@@ -45,7 +55,7 @@ def controls(body):
     if type(enabled) is not bool:raise ValueError('Height cutoff enabled must be boolean')
     cutoff=engine.number(body.get('height_cutoff_mm',0),-1e6,1e6,'Raw height cutoff mm')
     margin=engine.number(body.get('inward_margin_mm',0),0,100,'Inward margin mm')
-    return dict(height_cutoff_enabled=enabled,height_cutoff_mm=cutoff,inward_margin_mm=margin)
+    return dict(height_cutoff_enabled=enabled,height_cutoff_mm=cutoff,inward_margin_mm=margin,outline_key=outline.optional_key(body.get('outline_key')))
 
 
 def compute(mask, coefficients, intervals, spacing, origin, step=.05,inward_margin_mm=0):
@@ -114,13 +124,14 @@ def request(body):
     if sm['kind']!='stem': raise ValueError('Stem required')
     step=engine.number(body.get('step_mm',.05),.005,1,'Border step mm')
     options=controls(body)
-    deps=dict(stem_key=sk,merge_key=sm['merge_key'],step_mm=step,**options,algorithm_sha256=engine.signature([engine.digest(engine.HERE/'leaf_borders.py'),engine.digest(engine.HERE/'stem_arc.py')]))
+    deps=dict(stem_key=sk,merge_key=sm['merge_key'],step_mm=step,**options,algorithm_sha256=engine.signature([engine.digest(engine.HERE/'leaf_borders.py'),engine.digest(engine.HERE/'stem_arc.py')]+([engine.digest(engine.HERE/'outline.py')] if options['outline_key'] else [])))
     key=engine.signature(deps);dest=engine.CACHE/'borders'/key
     if (dest/'meta.json').exists():return {**json.loads((dest/'meta.json').read_text()),'cache_hit':True}
     start=time.monotonic()
     mm=json.loads((engine.CACHE/'merges'/sm['merge_key']/'meta.json').read_text())
     with np.load(root/sk/'native.npz',allow_pickle=False) as data: intervals=curve_domain(sm['fit'],data['curve_xy'],data['segment_lengths'])
-    with np.load(engine.CACHE/'merges'/sm['merge_key']/'raw.npz',allow_pickle=False) as data: mask=border_support(data['valid_mask'],data['height_mm'],options['height_cutoff_enabled'],options['height_cutoff_mm'])
+    region=outline.load_region(options['outline_key'],sm['merge_key']) if options['outline_key'] else None
+    with np.load(engine.CACHE/'merges'/sm['merge_key']/'raw.npz',allow_pickle=False) as data: mask=border_support(data['valid_mask'],data['height_mm'],options['height_cutoff_enabled'],options['height_cutoff_mm'],region)
     result=compute(mask,sm['fit']['coefficients'],intervals,mm['spacing_mm'][0],np.array(mm['origin_center_mm']),step,options['inward_margin_mm'])
     dest.mkdir(parents=True,exist_ok=True);np.savez_compressed(dest/'native.npz',**result)
     # JSON nulls preserve gaps. Base B reverses these arrays, swaps sides and signs.

@@ -21,6 +21,7 @@ This is a trusted-local scientific prototype, not a public service. Use `launch.
 - `area.py`: flat and 3D (slope-weighted) leaf area in mm² of a merge; native-grid foreground-only gradients, each merged cell takes the slope of its maximum-height source. Area cache depends on merge key and area/merge implementation hashes.
 - `stem_arc.py`: **shared physical arclength** for borders, candidate coordinates, CSV and plot.
 - `leaf_borders.py`: arclength sections, first raster-cell exit, optional cutoff/margin.
+- `outline.py` / `outline.mjs`: leaf outline of the merge; smoothing/redraw geometry lives only in `.mjs`, the server rasterizes the edited rings into a region used by area and borders (key `outline_key`, null = original mask).
 - `csv_exports.py`: artifact validation and numerical tables/download text. Never write user filenames on server.
 - `post.js`: post-merge UI, stage-specific dependencies, export generations and scientific overlays.
 - `plot.mjs`: nonmodal display of exporter tables; never a second science implementation.

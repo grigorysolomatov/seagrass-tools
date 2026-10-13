@@ -16,6 +16,7 @@ from PIL import Image
 import engine
 import merge
 import postmerge
+import outline
 from science import decode
 
 POLICY=('flat = valid merged cells × cell area; 3D = Σ cell area × sqrt(1+gx²+gy²); '
@@ -54,8 +55,11 @@ def native_area(z,mask,spacing):
  return float(mask.sum())*cell,float(slope_factor(z,mask,spacing).sum(dtype=np.float64))*cell
 
 
-def merged_area(merged,meta,sources):
+def merged_area(merged,meta,sources,region=None):
  """sources: [(z, mask, pose, spacing)] exactly as merged. Returns (flat, 3D, cells).
+
+ region: optional edited leaf region (outline.py) on the merged grid. Measured cells outside it
+ are dropped; cells inside it without height data count as flat (slope factor 1).
 
  Sampling repeats merge.accumulate's nearest index floor(native + .5) so every
  merged cell is matched to the very source sample that produced its height.
@@ -74,9 +78,12 @@ def merged_area(merged,meta,sources):
    inside=(u>=0)&(v>=0)&(u<w)&(v<h);np.clip(u,0,w-1,out=u);np.clip(v,0,h-1,out=v)
    tile=merged[start:start+len(ys)];done=assigned[start:start+len(ys)]
    take=inside&mask[v,u]&~done&(z[v,u]==tile)
-   total+=float(factor[v,u][take].sum(dtype=np.float64));done|=take
+   count=take if region is None else take&region[start:start+len(ys)]
+   total+=float(factor[v,u][count].sum(dtype=np.float64));done|=take
  cells=int(valid.sum())
  if int((assigned&valid).sum())!=cells:raise ValueError('Merged cells could not be matched to their source heights; Merge again')
+ if region is not None:
+  region=np.asarray(region,bool);added=int((region&~valid).sum());total+=added;cells=int(region.sum())
  return cells*r*r,total*r*r,cells
 
 
@@ -98,7 +105,8 @@ def request(body):
  if not isinstance(key,str) or key not in merge.MERGES:raise ValueError('Current registered merge required; Merge again')
  mm=json.loads((engine.CACHE/'merges'/key/'meta.json').read_text())
  postmerge.source_cohort(mm,20,validate_only=True)  # sources and masks unchanged since Merge
- deps=dict(merge_key=key,algorithm_sha256=engine.signature([engine.digest(engine.HERE/'area.py'),engine.digest(engine.HERE/'merge.py')]))
+ okey=outline.optional_key(body.get('outline_key'))
+ deps=dict(merge_key=key,outline_key=okey,algorithm_sha256=engine.signature([engine.digest(engine.HERE/'area.py'),engine.digest(engine.HERE/'merge.py')]+([engine.digest(engine.HERE/'outline.py')] if okey else [])))
  akey=engine.signature(deps);dest=engine.CACHE/'areas'/akey
  if (dest/'meta.json').exists():return {**json.loads((dest/'meta.json').read_text()),'cache_hit':True}
  start=time.monotonic()
@@ -110,10 +118,14 @@ def request(body):
   flat,surface=native_area(z,mask,spacing)
   slices.append(dict(path=s['path'],flat_mm2=flat,surface_mm2=surface,pixel_mm=spacing))
   sources.append((z,mask,s['pose'],spacing))
- flat,surface,cells=merged_area(merged,mm,sources);del sources,merged
+ region=outline.load_region(okey,key) if okey else None;edit=None
+ if okey:
+  om=json.loads((engine.CACHE/'outlines'/okey/'meta.json').read_text())
+  edit=dict(smoothing_mm=om['smoothing_mm'],redrawn_sections=om['redrawn_sections'],added_without_height_mm2=om['cells_without_height']*om['cell_mm']**2,removed_mm2=om['cells_removed']*om['cell_mm']**2)
+ flat,surface,cells=merged_area(merged,mm,sources,region);del sources,merged,region
  meta={**deps,'key':akey,'cache_hit':False,'units':'mm²','flat_mm2':flat,'surface_mm2':surface,'ratio':surface/flat if flat else None,
        'cells':cells,'cell_mm':mm['spacing_mm'][0],'height_units':'mm (raw TMD)','calibration':calibration(mm['sources']),
-       'slices':slices,'policy':POLICY,'seconds':round(time.monotonic()-start,3)}
+       'slices':slices,'outline':edit,'policy':POLICY+('; edited outline: '+outline.POLICY if okey else ''),'seconds':round(time.monotonic()-start,3)}
  dest.mkdir(parents=True,exist_ok=True);(dest/'meta.json').write_text(json.dumps(meta))
  return meta
 
@@ -123,8 +135,12 @@ def csv_text(meta,candidates=None):
  from csv_exports import number,table
  rows=[['leaf_flat_area','merged',number(meta['flat_mm2']),'mm2'],['leaf_3d_area','merged',number(meta['surface_mm2']),'mm2'],
        ['area_ratio_3d_to_flat','merged',number(meta['ratio']),''],['merged_cell_size','merged',number(meta['cell_mm']),'mm']]
+ e=meta.get('outline')
+ rows+=[['outline','merged','edited' if e else 'original','']]
+ if e:rows+=[['outline_smoothing','merged',number(e['smoothing_mm']),'mm'],['outline_redrawn_sections','merged',str(int(e['redrawn_sections'])),'count'],
+             ['outline_added_area_without_height','merged',number(e['added_without_height_mm2']),'mm2'],['outline_removed_area','merged',number(e['removed_mm2']),'mm2']]
  if candidates is not None:
-  rows+=[['trichome_candidates','merged',str(int(candidates)),'count'],['candidates_per_flat_area','merged',number(candidates/meta['flat_mm2']),'1/mm2'],
+  rows+=[['trichome_candidates','merged' if not e else 'inside outline',str(int(candidates)),'count'],['candidates_per_flat_area','merged',number(candidates/meta['flat_mm2']),'1/mm2'],
          ['candidates_per_3d_area','merged',number(candidates/meta['surface_mm2']),'1/mm2']]
  for i,(s,c) in enumerate(zip(meta['slices'],meta['calibration']),1):
   name=engine.Path(s['path']).name
@@ -133,13 +149,20 @@ def csv_text(meta,candidates=None):
  return table(['quantity','scope','value','unit'],rows)
 
 
+def candidates_inside(peaks_key,meta):
+ """Candidate count for densities: all candidates, or those inside the edited outline region."""
+ if not isinstance(peaks_key,str) or peaks_key not in postmerge.ARTIFACTS:raise ValueError('Current registered candidates required')
+ pm=json.loads((engine.CACHE/'postmerge'/peaks_key/'meta.json').read_text())
+ if pm['kind']!='peaks' or pm['merge_key']!=meta['merge_key']:raise ValueError('Candidates belong to another merge')
+ if not meta.get('outline_key'):return pm['count']
+ region=outline.load_region(meta['outline_key'],meta['merge_key']);xy=np.load(engine.CACHE/'postmerge'/peaks_key/'points.npy',allow_pickle=False).reshape(-1,2)
+ return int(region[xy[:,1],xy[:,0]].sum())
+
+
 def export(body):
  from csv_exports import filename
  name=filename(body.get('filename'));meta=request(body);count=None
  pk=body.get('peaks_key')
  if pk is not None:
-  if not isinstance(pk,str) or pk not in postmerge.ARTIFACTS:raise ValueError('Current registered candidates required')
-  pm=json.loads((engine.CACHE/'postmerge'/pk/'meta.json').read_text())
-  if pm['kind']!='peaks' or pm['merge_key']!=meta['merge_key']:raise ValueError('Candidates belong to another merge')
-  count=pm['count']
+  count=candidates_inside(pk,meta)
  return dict(filename=name,csv=csv_text(meta,count),candidates=count,units='mm²')

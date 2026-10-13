@@ -1,5 +1,6 @@
 import {handlesFor,paintCurve,paintHandles,hitHandle} from './curve_edit.mjs';
 import {floatingPlot} from './plot.mjs';
+import {applyEdits,strokeTarget,cleanStroke} from './outline.mjs';
 // Working-state indicators shared by every long action. Spinners are pure CSS
 // transforms; JS only toggles classes and short N/M · elapsed text once a second.
 // Display only: never touches scientific state or request ownership.
@@ -83,6 +84,11 @@ const HELP={
  leafBase:'Choose which existing combined-curve endpoint is the leaf base: End A or End B, labelled on the canvas. No anatomical base is inferred and no endpoint is moved. For equally near curve points (within 1e-7 native-grid pixels), choose the point reached first along the curve from this base. This updates nearest-point ties and reverses border arclength origin, left/right sides and signed distances, without refitting or detecting again.',
  showLines:'Display thin connections to numerically nearest points on the finite, mask-clipped combined polynomial stem, including valid extrapolated sections. Lines and candidate rings are independent. Requires BOTH current stem and candidates; gaps cannot be targets. Equal-distance ties follow arclength from Leaf base. No measurements or detection filters are added.',
  showCandidates:'Overlay computed residual-maximum candidate positions. Markers are exploratory candidates, not biologically validated trichomes.',
+ showOutline:'Draw the leaf outline used for leaf area and borders. Lavender = current outline; dashed grey = original outline from the merged mask, shown once you edit. Display only.',
+ outlineSmooth:'Smooth the outline along its length (Gaussian, in mm of outline length). 0 = original outline from the merged mask. Removes small zigzags from stitching; large values round off real detail. Leaf area, candidate density and leaf borders use the edited outline.',
+ redrawOutline:'Then drag on the canvas from one point on the outline to another: the shorter stretch of outline between them is replaced by your stroke. Start and end within about 15 screen pixels of the outline. Cells your stroke encloses are added (counted flat where no height exists); cells it cuts off are removed.',
+ undoOutline:'Undo the last outline change (smoothing, redrawn section or reset).',
+ resetOutline:'Return to the original outline from the merged mask. Undo brings the edits back.',
  markerSize:'Marker radius in screen pixels only (default 2). Changes visibility, not the detection window, candidate count or physical feature size.',
  fit:'Fit all original acquisition frames into view. Changes the camera only, not placement, masks or fit parameters.',
  canvas:'Click a slice to select it; drag to pan; wheel to zoom. Blank clicks retain selection. These viewing actions do not change the scientific data or edit history.',
@@ -163,7 +169,7 @@ export function postMerge({get,api,image,images,draw,error}){
  let exportBusy=false,exportGeneration=0;
  let automaticStem=null,curveBusy=false,curveGesture=null,curvePast=[],curveFuture=[],guideOffset=null,guideMerge=null,guideScreen=null,guideRadius=13,guideGesture=null,selectedCandidate=null;
  const automaticStems=new Map();
- const borderOptions=()=>({height_cutoff_enabled:$('heightCutoffEnabled').checked,height_cutoff_mm:value('heightCutoffMm'),inward_margin_mm:value('inwardMarginMm')});
+ const borderOptions=()=>({height_cutoff_enabled:$('heightCutoffEnabled').checked,height_cutoff_mm:value('heightCutoffMm'),inward_margin_mm:value('inwardMarginMm'),outline_key:outlineKey()});
  const exportReady=kind=>!busy&&!curveBusy&&!curveGesture&&!borderBusy&&stemCurrent()&&(kind==='borders'?bordersCurrent():peaksCurrent());
  const exportPayload=kind=>({kind,quality:$('exportQuality').checked,filename:$('filename'+(kind==='borders'?'Borders':'Trichomes')).value,base:$('leafBase').value,merge_key:get().merged?.key,stem_key:stem?.key,stem_parameters:stem?.parameters,...(kind==='borders'?{border_key:borders?.key,step_mm:value('borderStepMm'),...borderOptions()}:{peaks_key:peaks?.key,residual_key:residual?.key,residual_parameters:residual?.parameters,window:value('peakWindow')})});
  async function download(kind){
@@ -181,32 +187,119 @@ export function postMerge({get,api,image,images,draw,error}){
   finally{job.end();exportBusy=false;status();}
  }
  $('downloadBorders').onclick=()=>download('borders');$('downloadTrichomes').onclick=()=>download('trichomes');
+ // Leaf outline (step 5): original = outer boundary of the merged mask; edits = smoothing + redrawn
+ // sections (outline.mjs). Edits are kept per merge key, so Undo/Redo of the setup finds them again.
+ // With no edits every downstream request sends outline_key null = original mask, unchanged science.
+ let outlineOriginal=null,outlineFetch=null,outlineFailure='',outlineGesture=null,outlineBusy=false,sliderSnapshot=null,outlineTimer=null;
+ const outlineEdits=new Map(),outlineKeys=new Map(),outlineStats=new Map();let editedMemo={sig:null,rings:null};
+ const noEdits=()=>({sigmaMm:0,strokes:[],past:[],future:[]});
+ const outlineState=()=>{const k=get().merged?.key;if(!k)return noEdits();if(!outlineEdits.has(k))outlineEdits.set(k,noEdits());return outlineEdits.get(k);};
+ const outlineReady=()=>!!(outlineOriginal&&mergeCurrent()&&outlineOriginal.merge_key===get().merged.key);
+ const edited=()=>{const e=outlineState();return e.sigmaMm>0||e.strokes.length>0;};
+ const outlineSig=()=>JSON.stringify([get().merged?.key,outlineState().sigmaMm,outlineState().strokes]);
+ const outlineKey=()=>edited()?outlineKeys.get(outlineSig())||null:null;
+ const outlinePending=()=>edited()&&!outlineKey();
+ function editedRings(){
+  if(!outlineReady())return null;const sig=outlineSig();if(editedMemo.sig===sig)return editedMemo.rings;
+  const e=outlineState(),sigmaPx=e.sigmaMm/get().merged.spacing_mm[0];
+  editedMemo={sig,rings:edited()?applyEdits(outlineOriginal.rings,{sigmaPx,strokes:e.strokes}):outlineOriginal.rings};return editedMemo.rings;
+ }
+ async function fetchOutline(){
+  const key=get().merged.key;outlineFetch=key;outlineFailure='';
+  const job=beginBusy('Tracing leaf outline',{hints:['outlineStatus']});
+  try{const r=await api('/api/outline',{merge_key:key});if(outlineFetch===key)outlineOriginal={...r,rings:r.rings.map(a=>Float64Array.from(a))};}
+  catch(e){if(outlineFetch===key)outlineFailure=e.message;}
+  finally{job.end();status();draw();}
+ }
+ // Register the edited outline once the user pauses; area and borders wait for the key.
+ function scheduleRegister(){clearTimeout(outlineTimer);if(edited()&&!outlineKey())outlineTimer=setTimeout(registerOutline,350);status();draw();}
+ async function registerOutline(){
+  if(!outlineReady()||!edited()||outlineKey()||outlineBusy)return;
+  const sig=outlineSig(),e=outlineState(),rings=editedRings();outlineBusy=true;outlineFailure='';status();
+  const job=beginBusy('Saving edited outline',{hints:['outlineStatus']});
+  try{const r=await api('/api/outline/edit',{merge_key:get().merged.key,smoothing_mm:e.sigmaMm,redrawn_sections:e.strokes.length,rings:rings.map(a=>Array.from(a,v=>Math.round(v*1000)/1000))});outlineKeys.set(sig,r.key);outlineStats.set(r.key,r);}
+  catch(err){outlineFailure=err.message;error(err.message);}
+  finally{job.end();outlineBusy=false;if(edited()&&!outlineKey()&&!outlineFailure)scheduleRegister();status();draw();}
+ }
+ function outlineChange(mutate){const e=outlineState();e.past.push({sigmaMm:e.sigmaMm,strokes:e.strokes});e.future=[];mutate(e);syncOutlineInputs();exportGeneration++;borderGeneration++;outlineFailure='';scheduleRegister();}
+ function syncOutlineInputs(){const v=outlineState().sigmaMm;$('outlineSmooth').value=v;$('outlineSmoothValue').textContent=v?v.toFixed(3)+' mm':'off';}
+ function outlineStatus(){
+  const g=get(),ready=outlineReady(),e=outlineState();$('outlineEdit').hidden=!g.merged;
+  if(mergeCurrent()&&outlineFetch!==g.merged.key)fetchOutline();
+  for(const id of ['outlineSmooth','redrawOutline','showOutline'])$(id).disabled=!ready;
+  $('undoOutline').disabled=!ready||!e.past.length;$('redoOutline').disabled=!ready||!e.future.length;$('resetOutline').disabled=!ready||!edited();
+  if(!ready&&$('redrawOutline').checked)$('redrawOutline').checked=false;
+  $('canvas').classList.toggle('drawing',ready&&$('redrawOutline').checked);
+  const st=outlineStats.get(outlineKey()),mm2=v=>v.toFixed(3)+' mm²';
+  $('outlineStatus').textContent=!mergeCurrent()?(g.merging?'':'Merge again to edit the outline.'):outlineFailure?'Outline failed · '+outlineFailure:!ready?'Tracing leaf outline…':outlineBusy||outlinePending()?'Saving edited outline…':!edited()?'Original outline from the merged mask.':
+   `Edited · ${e.sigmaMm?'smoothing '+e.sigmaMm.toFixed(3)+' mm':'no smoothing'}${e.strokes.length?' · '+e.strokes.length+' redrawn':''}${st?[st.cells_without_height?` · +${mm2(st.cells_without_height*st.cell_mm**2)} added`:'',st.cells_removed?` · −${mm2(st.cells_removed*st.cell_mm**2)} cut`:''].join(''):''} · used for leaf area and borders.`;
+  syncOutlineInputs();
+ }
+ $('outlineSmooth').addEventListener('input',()=>{const e=outlineState();if(!sliderSnapshot)sliderSnapshot={sigmaMm:e.sigmaMm,strokes:e.strokes};e.sigmaMm=Number($('outlineSmooth').value);e.future=[];$('showOutline').checked=true;syncOutlineInputs();exportGeneration++;borderGeneration++;scheduleRegister();});
+ $('outlineSmooth').addEventListener('change',()=>{const e=outlineState();if(sliderSnapshot&&sliderSnapshot.sigmaMm!==e.sigmaMm)e.past.push(sliderSnapshot);sliderSnapshot=null;status();});
+ $('undoOutline').onclick=()=>{const e=outlineState();if(!e.past.length)return;e.future.push({sigmaMm:e.sigmaMm,strokes:e.strokes});Object.assign(e,e.past.pop());syncOutlineInputs();exportGeneration++;borderGeneration++;scheduleRegister();};
+ $('redoOutline').onclick=()=>{const e=outlineState();if(!e.future.length)return;e.past.push({sigmaMm:e.sigmaMm,strokes:e.strokes});Object.assign(e,e.future.pop());syncOutlineInputs();exportGeneration++;borderGeneration++;scheduleRegister();};
+ $('resetOutline').onclick=()=>{if(edited())outlineChange(e=>{e.sigmaMm=0;e.strokes=[];});};
+ $('redrawOutline').onchange=()=>{if($('redrawOutline').checked){$('showOutline').checked=true;$('editMergedCurve').checked=false;$('mergedEditControls').hidden=true;$('editSliceCurve').checked=false;$('resetSliceCurve').hidden=true;}status();draw();};
+ $('showOutline').onchange=()=>{status();draw();};
+ $('outlineEdit').addEventListener('toggle',()=>{if($('outlineEdit').open&&outlineReady())$('showOutline').checked=true;status();draw();});
+ function paintOutline(ctx,camera){
+  const rings=editedRings();if(!rings||!($('showOutline').checked||$('redrawOutline').checked||outlineGesture))return;
+  const m=get().merged,r=m.spacing_mm[0],o=m.origin_center_mm,sx=v=>camera.x+(o[0]+v*r)*camera.scale,sy=v=>camera.y+(o[1]+v*r)*camera.scale;
+  const path=(list,close=true)=>{ctx.beginPath();for(const a of list){for(let i=0;i<a.length;i+=2){const x=sx(a[i]),y=sy(a[i+1]);if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);}if(close)ctx.closePath();}};
+  ctx.save();
+  if(edited()){ctx.setLineDash([4,4]);ctx.strokeStyle='rgba(200,200,200,.65)';ctx.lineWidth=1;path(outlineOriginal.rings);ctx.stroke();ctx.setLineDash([]);}
+  for(const [ink,width] of [['#000',3],['#c58cff',1.5]]){ctx.strokeStyle=ink;ctx.lineWidth=width;path(rings);ctx.stroke();}
+  if(outlineGesture&&outlineGesture.points.length>=4){ctx.strokeStyle='#ff0088';ctx.lineWidth=2;path([outlineGesture.points],false);ctx.stroke();}
+  ctx.restore();
+ }
+ function outlineDown(e,camera,p){
+  if(!$('redrawOutline').checked||!outlineReady())return false;
+  const m=get().merged,r=m.spacing_mm[0],o=m.origin_center_mm,native=q=>q.map((v,k)=>((v-(k?camera.y:camera.x))/camera.scale-o[k])/r);
+  outlineGesture={id:e.pointerId,points:[...native(p)],native,tol:15/(r*camera.scale)};$('canvas').setPointerCapture(e.pointerId);draw();return true;
+ }
+ function outlineUp(){
+  const g=outlineGesture;outlineGesture=null;const stroke=cleanStroke(g.points,.5);
+  if(stroke.length<6){draw();return;}
+  const target=strokeTarget(editedRings(),stroke,g.tol);
+  if(!target){error('Start and end the stroke on the lavender outline (within about 15 screen pixels).');draw();return;}
+  error();outlineChange(e=>{e.strokes=[...e.strokes,{ring:target.ring,points:stroke.map(v=>Math.round(v*100)/100)}];});
+ }
  // Leaf area follows each current merge automatically (cached server-side). Display and export only.
  let leafArea=null,areaBusy=false,areaFailure='',areaRequested=null;
- const areaCurrent=()=>!!(leafArea&&mergeCurrent()&&leafArea.merge_key===get().merged.key);
+ const areaWant=()=>get().merged.key+'|'+(outlineKey()||'');
+ const areaCurrent=()=>!!(leafArea&&mergeCurrent()&&!outlinePending()&&leafArea.merge_key===get().merged.key&&(leafArea.outline_key||null)===outlineKey());
  const mm2=v=>v.toLocaleString(undefined,{minimumFractionDigits:3,maximumFractionDigits:3})+' mm²';
  async function computeArea(){
-  const key=get().merged.key;areaRequested=key;areaBusy=true;areaFailure='';status();
+  const key=get().merged.key,ok=outlineKey(),want=areaWant();areaRequested=want;areaBusy=true;areaFailure='';status();
   const job=beginBusy('Measuring leaf area',{hints:['areaStatus']});
-  try{const r=await api('/api/area',{merge_key:key});if(areaRequested===key)leafArea=r;}
-  catch(e){if(areaRequested===key)areaFailure=e.message;}
-  finally{job.end();if(areaRequested===key)areaBusy=false;status();}
+  try{const r=await api('/api/area',{merge_key:key,outline_key:ok});if(areaRequested===want){leafArea=r;insideCounts=new Map();}}
+  catch(e){if(areaRequested===want)areaFailure=e.message;}
+  finally{job.end();if(areaRequested===want)areaBusy=false;status();}
  }
  function areaStatus(){
   const g=get(),el=$('areaStatus'),p=peaksCurrent();el.hidden=!g.merged;
-  if(mergeCurrent()&&!areaBusy&&areaRequested!==g.merged.key)computeArea();
-  const a=areaCurrent()?leafArea:null;
-  el.textContent=areaBusy?'Measuring leaf area…':areaFailure?'Leaf area failed · '+areaFailure:!mergeCurrent()?(g.merging?'':'Leaf area · merge again to update.'):a?`Leaf area · flat ${mm2(a.flat_mm2)} · 3D ${mm2(a.surface_mm2)} (×${a.ratio.toFixed(3)})`+(p?` · ${peaks.count.toLocaleString()} candidates = ${(peaks.count/a.flat_mm2).toFixed(1)} / ${(peaks.count/a.surface_mm2).toFixed(1)} per mm² (flat / 3D)`:''):'';
+  if(mergeCurrent()&&!outlinePending()&&!areaBusy&&areaRequested!==areaWant())computeArea();
+  const a=areaCurrent()?leafArea:null,n=a&&p?(a.outline_key?areaCandidates(a):peaks.count):null;
+  el.textContent=areaBusy||(mergeCurrent()&&outlinePending())?'Measuring leaf area…':areaFailure?'Leaf area failed · '+areaFailure:!mergeCurrent()?(g.merging?'':'Leaf area · merge again to update.'):a?`Leaf area · flat ${mm2(a.flat_mm2)} · 3D ${mm2(a.surface_mm2)} (×${a.ratio.toFixed(3)})${a.outline_key?' · edited outline':''}`+(n!==null&&n!==undefined?` · ${n.toLocaleString()} candidates${a.outline_key?' inside':''} = ${(n/a.flat_mm2).toFixed(1)} / ${(n/a.surface_mm2).toFixed(1)} per mm² (flat / 3D)`:''):'';
   const cal=a?a.calibration.map((c,i)=>`Slice ${i+1}: ${(c.pixel_mm[0]*1000).toFixed(4)} × ${(c.pixel_mm[1]*1000).toFixed(4)} µm/px${c.scan_yaml_relative_difference!==null&&c.scan_yaml_relative_difference<1e-6?' (matches scan.yaml)':''} · flat ${mm2(a.slices[i].flat_mm2)} · 3D ${mm2(a.slices[i].surface_mm2)}`).join('\n'):'';
-  el.title=a?`Prepared-foreground area of the current merge, in mm². Flat = projected area: covered cells × (${(a.cell_mm*1000).toFixed(4)} µm)². 3D = area of the measured height surface, including trichomes: each cell × √(1 + slope²), slopes from raw TMD heights (mm) on each slice's native grid, between foreground neighbours only. Leaf-edge walls, background and slice seams are not counted; overlaps count once. Calibration from each TMD header:\n${cal}`:'Leaf area in mm², measured automatically after each Merge.';
+  el.title=a?`Prepared-foreground area of the current merge, in mm². Flat = projected area: covered cells × (${(a.cell_mm*1000).toFixed(4)} µm)². 3D = area of the measured height surface, including trichomes: each cell × √(1 + slope²), slopes from raw TMD heights (mm) on each slice's native grid, between foreground neighbours only. Leaf-edge walls, background and slice seams are not counted; overlaps count once.${a.outline_key?' Uses the edited outline: cells outside it are dropped, cells it adds without height count flat; candidate density counts candidates inside it.':''} Calibration from each TMD header:\n${cal}`:'Leaf area in mm², measured automatically after each Merge.';
   el.setAttribute('aria-description',el.title);
   const b=$('downloadArea');b.disabled=exportBusy||!a;b.title=a?'CSV: flat and 3D leaf area (mm²), per-slice areas, pixel size'+(p?', and candidates per mm².':'.'):'Requires a current Merge.';
+ }
+ // Candidates inside an edited outline need the region; counted server-side once per (area, candidates).
+ let insideCounts=new Map();
+ function areaCandidates(a){
+  const k=a.key+'|'+peaks.key;if(insideCounts.has(k))return insideCounts.get(k);insideCounts.set(k,null);
+  api('/api/area',{merge_key:a.merge_key,outline_key:a.outline_key,peaks_key:peaks.key}).then(r=>{insideCounts.set(k,r.candidates);status();}).catch(e=>{insideCounts.delete(k);error(e.message);});
+  return null;
  }
  async function downloadArea(){
   if(exportBusy||!areaCurrent())return;const key=leafArea.merge_key,pk=peaksCurrent()?peaks.key:null;
   exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing leaf area CSV',{buttons:['downloadArea'],hints:['exportStatus']});
-  try{const r=await api('/api/area/export',{merge_key:key,peaks_key:pk,filename:'leaf-area.csv'});
-   if(!areaCurrent()||leafArea.merge_key!==key)throw Error('Discarded: merge changed. Download again.');
+  const ok=leafArea.outline_key||null;
+  try{const r=await api('/api/area/export',{merge_key:key,outline_key:ok,peaks_key:pk,filename:'leaf-area.csv'});
+   if(!areaCurrent()||leafArea.merge_key!==key||(leafArea.outline_key||null)!==ok)throw Error('Discarded: merge or outline changed. Download again.');
    const url=URL.createObjectURL(new Blob([r.csv],{type:'text/csv;charset=utf-8'})),anchor=document.createElement('a');anchor.href=url;anchor.download=r.filename;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
    $('exportStatus').textContent=`Download ready · ${r.filename} · mm²${r.candidates!==null?' · with candidate density':''}`;
   }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
@@ -238,7 +331,7 @@ export function postMerge({get,api,image,images,draw,error}){
   $('undoMergedCurve').disabled=!s||!curvePast.length||curveBusy||!!busy;
   $('redoMergedCurve').disabled=!s||!curveFuture.length||curveBusy||!!busy;
   $('previewPlot').disabled=!exportReady('borders')&&!exportReady('trichomes');
-  areaStatus();
+  outlineStatus();areaStatus();
   $('heightCutoffMm').disabled=!$('heightCutoffEnabled').checked;
   for(const suffix of ['minus','plus'])$('heightCutoffMm-'+suffix).disabled=$('heightCutoffMm').disabled;
   plot.sync();
@@ -249,7 +342,7 @@ export function postMerge({get,api,image,images,draw,error}){
   }
   $('exportContext').textContent=`mm · base ${$('leafBase').value.toUpperCase()} · left + / right −`;
   $('exportPrerequisites').textContent=!s?'Fit a current merged stem to export.':!bordersCurrent()&&!p?'Compute borders or candidates to export.':!bordersCurrent()?'Borders unavailable or stale · compute leaf borders.':!p?'Candidates unavailable or stale · compute candidates.':'';
-  $('computeBorders').disabled=borderBusy||curveBusy||!!curveGesture||!s||!valid(['borderStepMm','inwardMarginMm',...($('heightCutoffEnabled').checked?['heightCutoffMm']:[])]);
+  $('computeBorders').disabled=borderBusy||curveBusy||outlinePending()||!!curveGesture||!s||!valid(['borderStepMm','inwardMarginMm',...($('heightCutoffEnabled').checked?['heightCutoffMm']:[])]);
   $('computeBorders').textContent=borderBusy?'Computing borders…':'Compute leaf borders';
   $('showBorders').disabled=!bordersCurrent();
   $('borderStatus').textContent=borderBusy?'Sampling normal cross-sections…':borderFailure?'Failed · '+borderFailure:!s?'Fit current merged stem first.':bordersCurrent()?`${borders.valid_count} / ${borders.count} sections · ${borders.step_mm} mm step · base ${$('leafBase').value.toUpperCase()}`:borders?'Stale · compute borders again.':'Ready · prepared foreground boundary.';
@@ -359,6 +452,7 @@ export function postMerge({get,api,image,images,draw,error}){
      for(const [i,p] of data.entries()){if(borders.break_before[i])started=false;if(!p){started=false;continue;}const x=camera.x+p[0]*camera.scale,y=camera.y+p[1]*camera.scale;if(started)ctx.lineTo(x,y);else ctx.moveTo(x,y);started=true;}ctx.stroke();}
    }ctx.setLineDash([]);
   }
+  paintOutline(ctx,camera);
   if(connectionsCurrent()&&$('showLines').checked){
    const targets=connections['targets_'+$('leafBase').value];
    ctx.strokeStyle='rgba(220,240,245,0.48)';ctx.lineWidth=.65;ctx.beginPath();
@@ -407,7 +501,7 @@ export function postMerge({get,api,image,images,draw,error}){
  const plot=floatingPlot({getState:()=>{const payload=kind=>{const p=exportPayload(kind);delete p.filename;delete p.quality;return p;};return {revision:get().revision,base:$('leafBase').value,borders:exportReady('borders')?payload('borders'):null,candidates:exportReady('trichomes')?payload('trichomes'):null};},api,onSelect:id=>{selectedCandidate=id;draw();}});
  $('previewPlot').onclick=()=>plot.open();
  $('resetGuides').onclick=()=>{guideOffset=null;draw();};
- $('editMergedCurve').onchange=()=>{$('mergedEditControls').hidden=!$('editMergedCurve').checked;$('resetSliceCurve').hidden=true;if($('editMergedCurve').checked){$('editSliceCurve').checked=false;$('showStem').checked=true;}draw();};
+ $('editMergedCurve').onchange=()=>{$('mergedEditControls').hidden=!$('editMergedCurve').checked;$('resetSliceCurve').hidden=true;if($('editMergedCurve').checked){$('editSliceCurve').checked=false;$('redrawOutline').checked=false;$('showStem').checked=true;}status();draw();};
  function changeStem(r){stem=r;$('stemTop').value=r.parameters.top;$('stemDegree').value=r.parameters.degree;automaticStem=automaticStems.get(r.automatic_key||r.key)||automaticStem;stemGeneration++;exportGeneration++;connectionGeneration++;borderGeneration++;failure='';status();draw();connect();}
  $('resetMergedCurve').onclick=()=>{if(!automaticStem||!stemCurrent())return;curvePast.push(stem);curveFuture=[];changeStem(automaticStem);};
  $('undoMergedCurve').onclick=()=>{if(!curvePast.length||curveBusy)return;curveFuture.push(stem);changeStem(curvePast.pop());};
@@ -415,12 +509,13 @@ export function postMerge({get,api,image,images,draw,error}){
  const pointerScreen=e=>{const b=$('canvas').getBoundingClientRect();return [e.clientX-b.left,e.clientY-b.top];};
  function pointerDown(e,camera){
   if(curveBusy||!mergeCurrent())return false;const p=pointerScreen(e),m=get().merged,r=m.spacing_mm[0],o=m.origin_center_mm;
+  if(outlineDown(e,camera,p))return true;
   if($('editMergedCurve').checked&&stemCurrent()&&!busy){const h=handlesFor(stem),screen=q=>q.map((v,k)=>(o[k]+v*r)*camera.scale+(k?camera.y:camera.x)),index=hitHandle(h,screen,p);if(index>=0){curveGesture={id:e.pointerId,handles:structuredClone(h),start:p,index,original:stem,generation:stemGeneration,revision:get().revision,moved:false};$('canvas').setPointerCapture(e.pointerId);status();return true;}}
   if(guideScreen&&($('guideMedian').checked||$('guideDetection').checked)&&Math.abs(p[0]-guideScreen[0])<=guideRadius&&Math.abs(p[1]-guideScreen[1])<=guideRadius){guideGesture={id:e.pointerId,start:p,offset:[...guideOffset]};$('canvas').setPointerCapture(e.pointerId);return true;}return false;
  }
- function pointerMove(e,camera){const p=pointerScreen(e);if(curveGesture){const g=curveGesture;if(e.pointerId!==g.id)return true;const r=get().merged.spacing_mm[0];g.handles[g.index]=handlesFor(g.original)[g.index].map((v,k)=>v+(p[k]-g.start[k])/(r*camera.scale));g.moved=true;draw();return true;}if(guideGesture){guideOffset=guideGesture.offset.map((v,k)=>v+(p[k]-guideGesture.start[k])/camera.scale);draw();return true;}return false;}
+ function pointerMove(e,camera){const p=pointerScreen(e);if(outlineGesture){if(e.pointerId===outlineGesture.id){outlineGesture.points.push(...outlineGesture.native(p));draw();}return true;}if(curveGesture){const g=curveGesture;if(e.pointerId!==g.id)return true;const r=get().merged.spacing_mm[0];g.handles[g.index]=handlesFor(g.original)[g.index].map((v,k)=>v+(p[k]-g.start[k])/(r*camera.scale));g.moved=true;draw();return true;}if(guideGesture){guideOffset=guideGesture.offset.map((v,k)=>v+(p[k]-guideGesture.start[k])/camera.scale);draw();return true;}return false;}
  async function commitCurve(g){if(!g.moved){status();draw();return;}curveBusy=true;status();const job=beginBusy('Checking edited curve',{hints:['stemStatus']});try{const r=await api('/api/curve/edit',{kind:'stem',key:g.original.key,handles:g.handles});if(g.revision!==get().revision||g.generation!==stemGeneration||!stemCurrent())throw Error('Manual curve discarded: scientific inputs changed.');curvePast.push(stem);curveFuture=[];changeStem({...r,revision:g.revision});error();}catch(e){failure='stem:'+e.message;error(e.message);}finally{job.end();curveBusy=false;status();draw();}}
- function pointerUp(e){if(curveGesture){const g=curveGesture;curveGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);commitCurve(g);return true;}if(guideGesture){guideGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);return true;}return false;}
- function pointerCancel(){let changed=false;if(curveGesture){curveGesture=null;changed=true;}if(guideGesture){guideOffset=guideGesture.offset;guideGesture=null;changed=true;}if(changed){status();draw();}}
- return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({leafArea:areaCurrent()?leafArea:null,areaBusy,areaFailure,editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
+ function pointerUp(e){if(outlineGesture){if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);outlineUp();return true;}if(curveGesture){const g=curveGesture;curveGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);commitCurve(g);return true;}if(guideGesture){guideGesture=null;if($('canvas').hasPointerCapture(e.pointerId))$('canvas').releasePointerCapture(e.pointerId);return true;}return false;}
+ function pointerCancel(){let changed=false;if(outlineGesture){outlineGesture=null;changed=true;}if(curveGesture){curveGesture=null;changed=true;}if(guideGesture){guideOffset=guideGesture.offset;guideGesture=null;changed=true;}if(changed){status();draw();}}
+ return {status,paint,paintOverlays,pointerDown,pointerMove,pointerUp,pointerCancel,preview:()=>{if(!residualCurrent())diagnosticPreview='';return diagnosticPreview;},clearPreview:()=>{diagnosticPreview='';},debug:()=>({outline:{ready:outlineReady(),edited:edited(),key:outlineKey(),pending:outlinePending(),busy:outlineBusy,failure:outlineFailure,state:outlineState(),originalRings:outlineOriginal?.rings.length,originalPoints:outlineOriginal?.rings.reduce((n,a)=>n+a.length/2,0),editedPoints:editedRings()?.reduce((n,a)=>n+a.length/2,0),stats:outlineStats.get(outlineKey())||null,rings:()=>editedRings()?.map(a=>Array.from(a))},leafArea:areaCurrent()?leafArea:null,areaBusy,areaFailure,editHandles:stemCurrent()?handlesFor(stem):null,curveBusy,curveUndo:curvePast.length,curveRedo:curveFuture.length,guideScreen,guideOffset,selectedCandidate,borderCoordinates:directedBorders(),borders,bordersCurrent:bordersCurrent(),diagnosticPreview,stem,residual,peaks,busy,connections,connectionBusy,connectionsCurrent:connectionsCurrent(),leafBase:$('leafBase').value,stemCurrent:!!stemCurrent(),residualCurrent:!!residualCurrent(),peaksCurrent:!!peaksCurrent(),pointCount:points.length/2})};
 }

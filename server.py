@@ -20,6 +20,7 @@ import leaf_borders
 import csv_exports
 import curve_edit
 import area
+import outline
 from science import decode
 
 HERE=engine.HERE
@@ -77,7 +78,7 @@ class Handler(engine.Handler):
     parts=path.split('/')
     if len(parts)!=4 or parts[2] not in LOADS or parts[3] not in ['photo.png','height.png']:raise ValueError('Unknown display asset')
     return self.respond(200,(engine.CACHE/'loads'/parts[2]/parts[3]).read_bytes(),'image/png')
-   if path in ['/','/app.js','/post.js','/blend.mjs','/model.mjs','/curve_edit.mjs','/hand_stem.mjs','/plot.mjs','/style.css']:
+   if path in ['/','/app.js','/post.js','/blend.mjs','/model.mjs','/curve_edit.mjs','/hand_stem.mjs','/plot.mjs','/outline.mjs','/style.css']:
     file=HERE/('index.html' if path=='/' else path[1:]);kind='text/javascript' if file.suffix in ['.js','.mjs'] else mimetypes.guess_type(file.name)[0]
     return self.respond(200,file.read_bytes(),kind)
    if path in ['/api/health','/api/browse'] or path.startswith('/asset/'):return super().do_GET()
@@ -89,13 +90,21 @@ class Handler(engine.Handler):
    if origin and origin!=f'http://{self.headers.get("Host")}':raise ValueError('Cross-origin requests forbidden')
    if self.headers.get_content_type()!='application/json':raise ValueError('JSON required')
    length=int(self.headers.get('Content-Length','0'))
-   if not 0<length<=1000000:raise ValueError('Invalid request length')
+   if not 0<length<=(8_000_000 if self.path=='/api/outline/edit' else 1000000):raise ValueError('Invalid request length')
    body=json.loads(self.rfile.read(length))
    if self.path=='/api/curve/edit':
     with SCIENCE_LOCK:r=curve_edit.request(body)
     return self.respond(200,r)
    if self.path=='/api/area':
-    with AREA_LOCK:r=area.request(body)  # cached merge only; own lock, never blocks stems/candidates
+    with AREA_LOCK:
+     r=area.request(body)  # cached merge only; own lock, never blocks stems/candidates
+     if body.get('peaks_key') is not None:r={**r,'candidates':area.candidates_inside(body['peaks_key'],r)}
+    return self.respond(200,r)
+   if self.path=='/api/outline':
+    with AREA_LOCK:r=outline.original(body)
+    return self.respond(200,r)
+   if self.path=='/api/outline/edit':
+    with AREA_LOCK:r=outline.edit(body)
     return self.respond(200,r)
    if self.path=='/api/area/export':
     with AREA_LOCK:r=area.export(body)

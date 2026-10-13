@@ -14,6 +14,7 @@
 !hand_stem.py
 !stem_arc.py
 !area.py
+!outline.py
 !server.py
 !app.js
 !post.js
@@ -22,5 +23,6 @@
 !curve_edit.mjs
 !hand_stem.mjs
 !plot.mjs
+!outline.mjs
 !index.html
 !style.css
