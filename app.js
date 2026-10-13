@@ -54,7 +54,7 @@ function status(){
  $('merge').disabled=busy||merging||!ok||!s.aligned;
  $('merge').textContent=merging?'Merging raw heights…':merged?'Merge again':'Merge maximum heights';
  $('mode').querySelector('[value=merged]').disabled=!merged;
- $('mergeStatus').textContent=merging?'Computing raw foreground maximum… Edits will discard this run.':mergeError?'Merge failed · '+mergeError:mergeStale?'Stale · setup edited. Merge again; slices remain editable.':merged?`Current · ${merged.dimensions.join(' × ')} · ${merged.spacing_mm[0].toPrecision(4)} mm/pixel · max of raw heights`:!ok||!s.aligned?'Prepare and align first.':'Ready · max of raw foreground heights on one physical grid.';
+ $('mergeStatus').textContent=merging?'Computing raw foreground maximum… Edits will discard this run.':mergeError?'Merge failed · '+mergeError:mergeStale?'Stale · setup edited. Merge again; slices remain editable.':merged?`Current · ${merged.dimensions.join(' × ')} · ${merged.spacing_mm[0].toPrecision(4)} mm/pixel · max of raw heights`:!ok||!s.aligned?'Remove background and align first.':'Ready · max of raw foreground heights on one physical grid.';
  for(const card of $('slices').children){const item=s.slices[+card.dataset.index];if(item){card.querySelector('small').textContent=`${item.angle}°${item.reverse?' · ends swapped':''}`;const badge=jobBadge(item.id),box=card.querySelector('.sliceJobBox');if(box&&box.dataset.html!==badge){box.dataset.html=badge;box.innerHTML=badge;}}}
  $('undo').disabled=busy||(!store.past.length&&!store.pending);$('redo').disabled=busy||!store.future.length;
  $('add').disabled=busy;$('add').classList.toggle('accent',!s.slices.length);$('load').disabled=loading;
@@ -66,12 +66,12 @@ function status(){
  $('prepareBackground').classList.toggle('accent',!ok&&!!s.slices.length);
  $('count').textContent=s.slices.length;$('loadStatus').textContent=loading?'Decoding photo + height data…':'';
  $('maskStatus').textContent=masking?'Each cut-out appears as it finishes.':!s.slices.length?'Load scans first.':ok?'Ready · Inspect the cut-out before Align.':s.background.enabled?'Mask settings changed. Remove background again; placement retained.':'Required before Align.';
- for(const k of ['curve','highlight']){$(k).disabled=!ok||$('mode').value==='merged';setHelp($(k),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'First remove background in step 2.');}
+ const noStems=!s.slices.some(x=>result(x))&&!computingStems;for(const k of ['curve','highlight']){$(k).disabled=!ok||noStems||$('mode').value==='merged';setHelp($(k),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':!ok?'First remove background in step 2.':noStems?'Compute slice stems first; this shows their result.':'');}
  $('source').disabled=!ok||$('mode').value==='merged';$('source').checked=(!ok&&!masking)||showSource;
  setHelp($('source'),$('mode').value==='merged'?'Unavailable in merged view: switch to Photo or Heightmap.':ok?'':'Original background is shown until step 2 is complete.');
  $('alignmentStatus').textContent=!ok?'First remove background in step 2.':!stemsReady()?'Compute current slice stems in step 3.':s.slices.length<2?'Load at least two slices to join.':stale()?'Setup changed · placement retained. Align again when ready.':s.aligned?'Aligned · refine the selected joint.':'Inspect stems, then Align.';
  $('empty').hidden=!!s.slices.length;
- $('status').textContent=merging?'Merging raw foreground heights…':$('mode').value==='merged'?(mergeStale?'Stale merged result · edit slices or Merge again':'Merged maximum heights · switch to Photo / Heightmap to inspect slices'):loading?'Loading native photo + TMD…':masking?'Removing background…':aligning?'Fitting curves and aligning leaf ends…':preparing?`Preparing preview (${preparing}) · placement unchanged`:!s.slices.length?'Start: add scan folders':!ok?'Next: remove background':stale()?'Setup changed · Align again to apply':s.aligned?'Aligned · inspect and refine joints':'Next: inspect boundaries, then Align';
+ $('status').textContent=merging?'Merging raw foreground heights…':$('mode').value==='merged'?(mergeStale?'Stale merged result · edit slices or Merge again':'Merged maximum heights · pick Photo or Heightmap at the top to see slices'):loading?'Loading native photo + TMD…':masking?'Removing background…':aligning?'Fitting curves and aligning leaf ends…':preparing?`Preparing preview (${preparing}) · placement unchanged`:!s.slices.length?'Start: add scan folders':!ok?'Next: remove background':stale()?'Setup changed · Align again to apply':s.aligned?'Aligned · inspect and refine joints':!stemsReady()?'Next: inspect the cut-outs, then compute slice stems':'Next: inspect stems, then Align';
 }
 function refresh(){if(!store.state.slices.some(s=>s.id===selected))selected=store.state.slices[0]?.id||null;renderSide();status();draw();schedulePreview();}
 function edit(fn){store.edit(fn);error();refresh();}
@@ -159,7 +159,7 @@ async function doMerge(){
  if(revision!==store.revision){error('Merge discarded: setup changed during computation. Merge again.');return;}
  merged=r;mergeRevision=revision;post.clearPreview();$('mode').value='merged';draw();
  }catch(e){mergeError=e.message;error('Merge failed; slices and last result retained. '+e.message);}
- finally{job.end();merging=false;status();}
+ finally{job.end();merging=false;status();draw();}
 }
 async function doAlign(){
  if(aligning||loading||curveBusy||!stemsReady()||store.state.slices.length<2)return;store.end();if([...document.querySelectorAll('#loadStep input[type=number]:not(:disabled), #backgroundStep input[type=number]:not(:disabled), #alignmentStep input[type=number]:not(:disabled), #alignRefineStep input[type=number]:not(:disabled)')].some(e=>e.value===''||!e.validity.valid)){error('Correct invalid numeric values before Align.');return;}
