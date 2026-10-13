@@ -171,22 +171,64 @@ export function postMerge({get,api,image,images,draw,error}){
  const automaticStems=new Map();
  const borderOptions=()=>({height_cutoff_enabled:$('heightCutoffEnabled').checked,height_cutoff_mm:value('heightCutoffMm'),inward_margin_mm:value('inwardMarginMm'),outline_key:outlineKey()});
  const exportReady=kind=>!busy&&!curveBusy&&!curveGesture&&!borderBusy&&stemCurrent()&&(kind==='borders'?bordersCurrent():peaksCurrent());
- const exportPayload=kind=>({kind,quality:$('exportQuality').checked,filename:$('filename'+(kind==='borders'?'Borders':'Trichomes')).value,base:$('leafBase').value,merge_key:get().merged?.key,stem_key:stem?.key,stem_parameters:stem?.parameters,...(kind==='borders'?{border_key:borders?.key,step_mm:value('borderStepMm'),...borderOptions()}:{peaks_key:peaks?.key,residual_key:residual?.key,residual_parameters:residual?.parameters,window:value('peakWindow')})});
+ // One Export chooser (step 9): kind + filename (remembered per kind) + one Download button.
+ const exportNames={trichomes:'trichomes.csv',borders:'leaf-borders.csv',area:'leaf-area.csv',outline:'leaf-outline.csv',heightmap:'heightmap.tif'};
+ const exportKind=()=>$('exportKind').value;
+ function saveFile(blob,name){const url=URL.createObjectURL(blob),anchor=document.createElement('a');anchor.href=url;anchor.download=name;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}
+ function savedName(kind,name){exportNames[kind]=name;if(exportKind()===kind)$('exportFilename').value=name;}
+ const exportPayload=kind=>({kind,quality:$('exportQuality').checked,filename:exportNames[kind],base:$('leafBase').value,merge_key:get().merged?.key,stem_key:stem?.key,stem_parameters:stem?.parameters,...(kind==='borders'?{border_key:borders?.key,step_mm:value('borderStepMm'),...borderOptions()}:{peaks_key:peaks?.key,residual_key:residual?.key,residual_parameters:residual?.parameters,window:value('peakWindow')})});
  async function download(kind){
   if(exportBusy||!exportReady(kind))return;
   const revision=get().revision,generation=exportGeneration,payload=exportPayload(kind),signature=JSON.stringify(payload);
-  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing '+kind+' CSV',{buttons:['download'+(kind==='borders'?'Borders':'Trichomes')],hints:['exportStatus']});
+  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing '+kind+' CSV',{buttons:['downloadExport'],hints:['exportStatus']});
   try{
    const result=await api('/api/export',payload);
    if(revision!==get().revision||generation!==exportGeneration||!exportReady(kind)||signature!==JSON.stringify(exportPayload(kind)))throw Error('Discarded: export settings or scientific inputs changed. Download again.');
    const expected=kind==='borders'?borders.count:peaks.count;if(result.count!==expected)throw Error('Export row count mismatch');
-   const blob=new Blob([result.csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),anchor=document.createElement('a');anchor.href=url;anchor.download=result.filename;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
-   $('filename'+(kind==='borders'?'Borders':'Trichomes')).value=result.filename;
+   saveFile(new Blob([result.csv],{type:'text/csv;charset=utf-8'}),result.filename);savedName(kind,result.filename);
    $('exportStatus').textContent=`Download ready · ${result.filename} · ${result.count.toLocaleString()} rows · base ${result.base.toUpperCase()}`;
   }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
   finally{job.end();exportBusy=false;status();}
  }
- $('downloadBorders').onclick=()=>download('borders');$('downloadTrichomes').onclick=()=>download('trichomes');
+ // Leaf outline CSV: the edited outline when there is one (else the original), stitched world mm.
+ const outlineExportReady=()=>outlineReady()&&!outlinePending()&&!outlineBusy;
+ async function downloadOutline(){
+  if(exportBusy||!outlineExportReady())return;const key=get().merged.key,ok=outlineKey(),generation=exportGeneration;
+  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing leaf outline CSV',{buttons:['downloadExport'],hints:['exportStatus']});
+  try{const r=await api('/api/export/outline',{merge_key:key,outline_key:ok,filename:exportNames.outline});
+   if(!outlineExportReady()||get().merged.key!==key||outlineKey()!==ok||generation!==exportGeneration)throw Error('Discarded: merge or outline changed. Download again.');
+   saveFile(new Blob([r.csv],{type:'text/csv;charset=utf-8'}),r.filename);savedName('outline',r.filename);
+   $('exportStatus').textContent=`Download ready · ${r.filename} · ${r.points.toLocaleString()} points · ${r.rings} ring${r.rings===1?'':'s'} · ${r.edited?'edited':'original'} outline · mm`;
+  }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
+  finally{job.end();exportBusy=false;status();}
+ }
+ // Height map: binary float32 TIFF straight from the cached merge (can be tens of MB).
+ async function downloadHeightmap(){
+  if(exportBusy||!mergeCurrent())return;const key=get().merged.key,revision=get().revision;
+  exportBusy=true;error();$('exportStatus').textContent='Preparing height map TIFF…';status();const job=beginBusy('Preparing height map TIFF',{buttons:['downloadExport'],hints:['exportStatus']});
+  try{const r=await fetch('/api/export/heightmap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({merge_key:key,filename:exportNames.heightmap})});
+   if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m;}catch{}throw Error(m);}
+   const blob=await r.blob(),name=r.headers.get('X-Filename')||exportNames.heightmap;
+   if(!mergeCurrent()||get().merged.key!==key||get().revision!==revision)throw Error('Discarded: merge changed. Download again.');
+   saveFile(blob,name);savedName('heightmap',name);
+   $('exportStatus').textContent=`Download ready · ${name} · ${(blob.size/1e6).toFixed(1)} MB · float32 heights in mm, NaN = no data`;
+  }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
+  finally{job.end();exportBusy=false;status();}
+ }
+ $('downloadExport').onclick=()=>{const k=exportKind();if(k==='borders'||k==='trichomes')download(k);else if(k==='area')downloadArea();else if(k==='outline')downloadOutline();else downloadHeightmap();};
+ $('exportKind').addEventListener('change',()=>{$('exportFilename').value=exportNames[exportKind()];if(!exportBusy)$('exportStatus').textContent='';status();});
+ $('exportFilename').addEventListener('input',()=>{exportNames[exportKind()]=$('exportFilename').value;});
+ // Readiness of the chosen export: [ready, reason when not ready, button suffix].
+ function exportChoice(){
+  const k=exportKind(),s=stemCurrent();
+  if(k==='trichomes')return exportReady(k)?[true,'',' · '+peaks.count.toLocaleString()]:[false,!s?'Fit a current merged stem (step 6) and compute candidates (step 7).':'Compute candidates (step 7).'];
+  if(k==='borders')return exportReady(k)?[true,'',' · '+borders.count.toLocaleString()]:[false,!s?'Fit a current merged stem (step 6) and compute leaf borders (step 8).':'Compute leaf borders (step 8).'];
+  if(!mergeCurrent())return [false,'Merge first (step 5).'];
+  if(k==='area')return areaCurrent()?[true,'']:[false,areaFailure?'Leaf area failed · '+areaFailure:'Measuring leaf area…'];
+  if(k==='outline')return outlineExportReady()?[true,'',edited()?' · edited':'']:[false,outlineFailure?'Outline failed · '+outlineFailure:'Preparing leaf outline…'];
+  return [true,''];
+ }
+ const exportHelp={trichomes:'One row per candidate: stem coordinates (x along the stem from the leaf base, y signed distance), PCA coordinates (straight axes of the stem fit) and stitched global x/y, all in mm, plus height.',borders:'Left and right leaf border distance along the stem, mm, from the selected leaf base.',area:'Flat and 3D leaf area (mm²), per-slice areas and pixel sizes; with candidates also candidates per mm².',outline:'Leaf outline points in stitched global mm (x right, y down): the edited outline if you edited it in step 5, else the original.',heightmap:'Merged height map as a 32-bit float TIFF: heights in mm, NaN where there is no leaf, pixel size in mm (ImageJ/Fiji reads it directly).'};
  // Leaf outline (step 5): original = outer boundary of the merged mask; edits = smoothing + redrawn
  // sections (outline.mjs). Edits are kept per merge key, so Undo/Redo of the setup finds them again.
  // With no edits every downstream request sends outline_key null = original mask, unchanged science.
@@ -285,7 +327,6 @@ export function postMerge({get,api,image,images,draw,error}){
   const cal=a?a.calibration.map((c,i)=>`Slice ${i+1}: ${(c.pixel_mm[0]*1000).toFixed(4)} × ${(c.pixel_mm[1]*1000).toFixed(4)} µm/px${c.scan_yaml_relative_difference!==null&&c.scan_yaml_relative_difference<1e-6?' (matches scan.yaml)':''} · flat ${mm2(a.slices[i].flat_mm2)} · 3D ${mm2(a.slices[i].surface_mm2)}`).join('\n'):'';
   el.title=a?`Prepared-foreground area of the current merge, in mm². Flat = projected area: covered cells × (${(a.cell_mm*1000).toFixed(4)} µm)². 3D = area of the measured height surface, including trichomes: each cell × √(1 + slope²), slopes from raw TMD heights (mm) on each slice's native grid, between foreground neighbours only. Leaf-edge walls, background and slice seams are not counted; overlaps count once.${a.outline_key?' Uses the edited outline: cells outside it are dropped, cells it adds without height count flat; candidate density counts candidates inside it.':''} Calibration from each TMD header:\n${cal}`:'Leaf area in mm², measured automatically after each Merge.';
   el.setAttribute('aria-description',el.title);
-  const b=$('downloadArea');b.disabled=exportBusy||!a;b.title=a?'CSV: flat and 3D leaf area (mm²), per-slice areas, pixel size'+(p?', and candidates per mm².':'.'):'Requires a current Merge.';
  }
  // Candidates inside an edited outline need the region; counted server-side once per (area, candidates).
  let insideCounts=new Map();
@@ -296,17 +337,16 @@ export function postMerge({get,api,image,images,draw,error}){
  }
  async function downloadArea(){
   if(exportBusy||!areaCurrent())return;const key=leafArea.merge_key,pk=peaksCurrent()?peaks.key:null;
-  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing leaf area CSV',{buttons:['downloadArea'],hints:['exportStatus']});
+  exportBusy=true;error();$('exportStatus').textContent='Preparing CSV…';status();const job=beginBusy('Preparing leaf area CSV',{buttons:['downloadExport'],hints:['exportStatus']});
   const ok=leafArea.outline_key||null;
-  try{const r=await api('/api/area/export',{merge_key:key,outline_key:ok,peaks_key:pk,filename:'leaf-area.csv'});
+  try{const r=await api('/api/area/export',{merge_key:key,outline_key:ok,peaks_key:pk,filename:exportNames.area});
    if(!areaCurrent()||leafArea.merge_key!==key||(leafArea.outline_key||null)!==ok)throw Error('Discarded: merge or outline changed. Download again.');
-   const url=URL.createObjectURL(new Blob([r.csv],{type:'text/csv;charset=utf-8'})),anchor=document.createElement('a');anchor.href=url;anchor.download=r.filename;document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+   saveFile(new Blob([r.csv],{type:'text/csv;charset=utf-8'}),r.filename);savedName('area',r.filename);
    $('exportStatus').textContent=`Download ready · ${r.filename} · mm²${r.candidates!==null?' · with candidate density':''}`;
   }catch(e){$('exportStatus').textContent='Failed · '+e.message;error(e.message);}
   finally{job.end();exportBusy=false;status();}
  }
- $('downloadArea').onclick=downloadArea;
- for(const id of ['filenameBorders','filenameTrichomes','leafBase','stemTop','stemDegree','medianWindow','medianBits','peakWindow','borderStepMm','heightCutoffEnabled','heightCutoffMm','inwardMarginMm','exportQuality'])$(id).addEventListener('input',()=>{exportGeneration++;if(!exportBusy)$('exportStatus').textContent='';});
+ for(const id of ['exportFilename','leafBase','stemTop','stemDegree','medianWindow','medianBits','peakWindow','borderStepMm','heightCutoffEnabled','heightCutoffMm','inwardMarginMm','exportQuality'])$(id).addEventListener('input',()=>{exportGeneration++;if(!exportBusy)$('exportStatus').textContent='';});
  let borders=null,borderBusy=false,borderFailure='',borderGeneration=0;
  let connections=null,connectionBusy=false,connectionFailure='',connectionGeneration=0;
  let stem=null,residual=null,peaks=null,points=new Int32Array(),busy='',failure='',stemGeneration=0,detectionGeneration=0;
@@ -335,13 +375,10 @@ export function postMerge({get,api,image,images,draw,error}){
   $('heightCutoffMm').disabled=!$('heightCutoffEnabled').checked;
   for(const suffix of ['minus','plus'])$('heightCutoffMm-'+suffix).disabled=$('heightCutoffMm').disabled;
   plot.sync();
-  for(const [kind,suffix] of [['borders','Borders'],['trichomes','Trichomes']]){
-   const ready=exportReady(kind),button=$('download'+suffix);button.disabled=exportBusy||!ready;
-   const count=kind==='borders'?borders?.count:peaks?.count;button.textContent=`Download ${kind}${ready?' · '+count.toLocaleString():''}`;
-   button.title=ready?'CSV in millimetres, relative to selected Leaf base.':'Requires current '+(kind==='borders'?'stem and leaf borders.':'stem and candidates.');
-  }
-  $('exportContext').textContent=`mm · base ${$('leafBase').value.toUpperCase()} · left + / right −`;
-  $('exportPrerequisites').textContent=!s?'Fit a current merged stem to export.':!bordersCurrent()&&!p?'Compute borders or candidates to export.':!bordersCurrent()?'Borders unavailable or stale · compute leaf borders.':!p?'Candidates unavailable or stale · compute candidates.':'';
+  {const [ready,why,suffix='']=exportChoice(),k=exportKind(),button=$('downloadExport');button.disabled=exportBusy||!ready;
+   if(!exportBusy)button.textContent='Download'+(ready?suffix:'');button.title=exportHelp[k];
+   $('exportContext').textContent=k==='trichomes'||k==='borders'?`mm · base ${$('leafBase').value.toUpperCase()} · left + / right −`:k==='heightmap'?'32-bit float TIFF · heights mm · NaN = no data':k==='area'?'mm²':'global mm · x right, y down';
+   $('exportPrerequisites').textContent=ready?'':why;}
   $('computeBorders').disabled=borderBusy||curveBusy||outlinePending()||!!curveGesture||!s||!valid(['borderStepMm','inwardMarginMm',...($('heightCutoffEnabled').checked?['heightCutoffMm']:[])]);
   $('computeBorders').textContent=borderBusy?'Computing borders…':'Compute leaf borders';
   $('showBorders').disabled=!bordersCurrent();

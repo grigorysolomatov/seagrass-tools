@@ -72,7 +72,7 @@ All referenced files must resolve inside that scan folder. Canonical paths and s
 6. **Combined stem.** Default **top 20%, degree 3** independently within each source foreground, then one pooled fit. Select Leaf base A or B; it does not infer anatomy or move the curve. Edit combined curve reveals its own Reset/Undo/Redo. Editing invalidates stem-coordinate outputs, not detector arrays.
 7. **Candidates.** Median window 101 px and detection window 21 px are separate odd native-grid widths. Median histogram precision defaults to 12 bits; this is approximation precision, not source bit depth. Residual is signed raw height minus median. Only full finite windows survive. One deterministic representative per tied regional maximum; no amplitude/area filter. Optional draggable size guides start near A. Temporary median/residual previews do not change science.
 8. **Leaf borders.** First normal-ray exit from connected prepared support at arclength samples. Optional raw-height cutoff is off; inward margin is zero. Neither affects detector arrays. Inspect gaps; profiles are solid but never intentionally bridge missing support.
-9. **Plot & export.** Move/resize the plot, Fit, pan/zoom and hover; click a candidate to identify it in the workspace. Bright axes show mm, signed distance and zero. Plot and CSV share numerical tables. Download separate border, candidate and leaf-area CSVs; the browser chooses the destination, not the server.
+9. **Plot & export.** Move/resize the plot, Fit, pan/zoom and hover; click a candidate to identify it in the workspace. Bright axes show mm, signed distance and zero. Plot and CSV share numerical tables. Pick what to save in **Export** (trichome positions, leaf borders, leaf area, leaf outline, height map), adjust the filename and press **Download**; the hint under the button says what is still missing. The browser chooses the destination, not the server. See [Exports](#exports).
 
 ### Top-percentage semantics
 
@@ -80,10 +80,32 @@ Both stem stages call the **same** foreground selector: `valid = prepared_mask &
 
 **The mask's fixed full-image top-5% seed is a different operation and stays 5%.** Changing the stem setting does not alter mask generation.
 
+## Exports
+
+All lengths are mm. Step 9 → **Export** offers one file at a time:
+
+| Export | Default file | Needs | Columns / content |
+|---|---|---|---|
+| Trichome positions | `trichomes.csv` | stem (6) + candidates (7) | `id`; stem system `x_mm`, `y_mm`; `height_mm`; `side_ambiguous` (quality flags on); PCA system `pca_u_mm`, `pca_v_mm`; global system `global_x_mm`, `global_y_mm` |
+| Leaf borders | `leaf-borders.csv` | stem (6) + borders (8) | `x_mm`, `left_y_mm`, `right_y_mm`; `valid`, `break_before` (quality flags on) |
+| Leaf area | `leaf-area.csv` | Merge (5) | `quantity,scope,value,unit` rows, see below |
+| Leaf outline | `leaf-outline.csv` | Merge (5) | `ring`, `point`, `x_mm`, `y_mm` |
+| Height map | `heightmap.tif` | Merge (5) | 32-bit float TIFF of merged raw heights |
+
+Trichome coordinate systems (one row per candidate, same `id` as the plot):
+
+- **Stem** (`x_mm`, `y_mm`): arclength along the combined stem from the selected Leaf base to the nearest stem point, and signed Euclidean distance to it (left +). Follows a curved stem.
+- **PCA** (`pca_u_mm`, `pca_v_mm`): straight axes of the combined stem fit. Origin = centroid of the stem's top-% observations; `u` along the first principal axis, pointing from the selected Leaf base towards the other end; `v` perpendicular, left + (same side convention as `y_mm`). For a curved stem `u` is not arclength. If the combined curve was edited by hand, the axes stay those of the automatic fit.
+- **Global** (`global_x_mm`, `global_y_mm`): position in the stitched (merged) image, x right, y down, as on screen. Plain coordinates, valid for any leaf shape; independent of the stem and Leaf base. Same frame as the outline and height map.
+
+Leaf outline: closed rings (last point joins the first), ring 1 the largest, in the global frame. It is the edited outline when step 5's Leaf outline was smoothed or redrawn, otherwise the original outer boundary of the merged mask (boundary cell centres).
+
+Height map: ImageJ-style TIFF (Fiji/ImageJ and Python `tifffile` read it; other TIFF readers get the values and pixel size), float32 raw merged heights in mm (maximum of source heights, not levelled), `NaN` = no leaf / no data. Pixel size in mm is stored as the TIFF resolution with unit `mm`; ImageJ origin is set so ImageJ shows global mm. The ImageJ `Info` field holds JSON with `pixel_mm`, `origin_center_mm`, `height_units`, `no_data`, dimensions, height range and source folder names. Pixel (column, row) centre → global mm: `x = origin_center_mm[0] + column × pixel_mm[0]`, `y = origin_center_mm[1] + row × pixel_mm[1]`. Large merges give tens of MB (zlib-compressed).
+
 ### CSV meanings
 
 - Borders: `x_mm` = physical stem arclength from the selected base; `left_y_mm` / `right_y_mm` are signed normal distances. Missing measurements stay blank.
-- Candidates: stable `id`, `x_mm` = arclength to the finite nearest stem target, `y_mm` = signed Euclidean distance; `height_mm` = **max minus min of the median-subtracted residual in that candidate's complete detection window**, not raw-height range or peak amplitude.
+- Candidates: stable `id`, `x_mm` = arclength to the finite nearest stem target, `y_mm` = signed Euclidean distance; `height_mm` = **max minus min of the median-subtracted residual in that candidate's complete detection window**, not raw-height range or peak amplitude. PCA and global columns follow (see [Exports](#exports)).
 - Leaf area (`quantity,scope,value,unit`): `leaf_flat_area` and `leaf_3d_area` in mm² for the current merge, their ratio, merged cell size, per-slice areas and pixel sizes; with current candidates also `trichome_candidates`, `candidates_per_flat_area` and `candidates_per_3d_area` (1/mm²). Calibration is the TMD header pixel pitch (`length / pixels`, checked against `scan.yaml` `mmperpixel`) and raw TMD heights in mm. Flat = valid merged cells × cell area. 3D = Σ cell area × √(1 + ∂z/∂x² + ∂z/∂y²), with gradients on each slice's native grid between prepared-foreground neighbours only, so leaf-edge walls, background and seams between unlevelled slices are excluded and overlaps count once. Surface detail finer than one pixel (~2.8 µm on GelSight Max) is not resolved, so 3D area is a lower bound of the true surface. It depends on the prepared mask. Rows `outline` (`original`/`edited`) and, when edited, `outline_smoothing` (mm), `outline_redrawn_sections`, `outline_added_area_without_height` and `outline_removed_area` (mm²); `trichome_candidates` then has scope `inside outline`.
 - Optional quality fields: `valid` means supported borders, `break_before` starts a new disconnected line, `side_ambiguous` indicates undefined left/right (on-curve or tangent-extension cases), not candidate rejection. Without quality columns, blank border rows preserve discontinuities.
 

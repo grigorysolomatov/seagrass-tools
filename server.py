@@ -59,6 +59,10 @@ class Handler(engine.Handler):
   except ValueError:
    self.send_error(403,'Only localhost Host headers are allowed');return False
   return True
+ def respond_file(self,raw,kind,name):
+  # name is validated by csv_exports.filename; the browser chooses where to save it.
+  self.send_response(200);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(raw)));self.send_header('X-Filename',name)
+  self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.end_headers();self.wfile.write(raw)
  def do_GET(self):
   try:
    path=urlparse(self.path).path
@@ -112,6 +116,12 @@ class Handler(engine.Handler):
    if self.path=='/api/plot':
     with SCIENCE_LOCK:r=csv_exports.request({**body,'plot':True,'quality':True,'filename':'plot.csv'})
     return self.respond(200,r)
+   if self.path=='/api/export/outline':
+    with AREA_LOCK:r=csv_exports.outline_request(body)
+    return self.respond(200,r)
+   if self.path=='/api/export/heightmap':
+    name,raw,info=csv_exports.heightmap_request(body)  # read-only cached merge; no science lock
+    return self.respond_file(raw,'image/tiff',name)
    if self.path=='/api/export':
     with SCIENCE_LOCK:r=csv_exports.request(body)
     return self.respond(200,r)

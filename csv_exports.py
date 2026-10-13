@@ -4,15 +4,16 @@ import io
 import re
 import numpy as np
 
-def filename(value):
-    if not isinstance(value,str): raise ValueError('Enter a CSV filename')
+def filename(value,ext='.csv'):
+    kind=ext[1:].upper()
+    if not isinstance(value,str): raise ValueError('Enter a '+kind+' filename')
     if re.search(r'[\x00-\x1f\x7f/\\\\:*?"<>|]',value): raise ValueError('Use a filename, not a path; control characters are forbidden')
     value=value.strip()
-    if value.lower().endswith('.csv'): value=value[:-4]
+    if value.lower().endswith(ext): value=value[:-len(ext)]
     if (not value or len(value)>120 or value.endswith(('.', ' ')) or value.startswith(('.', '=', '+', '-', '@'))
-        or value.lower().endswith('.csv') or re.fullmatch(r'(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?',value)):
-        raise ValueError('Enter a simple filename of 1–120 characters, with at most one .csv extension')
-    return value+'.csv'
+        or value.lower().endswith(ext) or re.fullmatch(r'(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?',value)):
+        raise ValueError('Enter a simple filename of 1–120 characters, with at most one '+ext+' extension')
+    return value+ext
 
 def number(value):
     if not np.isfinite(value): raise ValueError('Nonfinite exported measurement')
@@ -33,9 +34,51 @@ def border_csv(meta, base, quality=True):
         rows.append([number(x),number(left) if valid else '',number(right) if valid else '']+([str(valid).lower(),str(bool(broken)).lower()] if quality else []))
     return table(['x_mm','left_y_mm','right_y_mm']+(['valid','break_before'] if quality else []),rows)
 
-def candidate_csv(ids,x,y,height,ambiguous,quality=True):
-    return table(['id','x_mm','y_mm','height_mm']+(['side_ambiguous'] if quality else []),
-                 ([int(i),number(a),number(b),number(h)]+([str(bool(flag)).lower()] if quality else []) for i,a,b,h,flag in zip(ids,x,y,height,ambiguous,strict=True)))
+EXTRA_COLUMNS=['pca_u_mm','pca_v_mm','global_x_mm','global_y_mm']
+
+def candidate_csv(ids,x,y,height,ambiguous,quality=True,extra=None):
+    """Stem columns first (unchanged order); optional extra = (pca_u,pca_v,global_x,global_y) appended."""
+    cols=[] if extra is None else list(extra)
+    if cols and (len(cols)!=len(EXTRA_COLUMNS) or any(len(c)!=len(x) for c in cols)):raise ValueError('Coordinate column length mismatch')
+    header=['id','x_mm','y_mm','height_mm']+(['side_ambiguous'] if quality else [])+(EXTRA_COLUMNS if extra is not None else [])
+    rows=(([int(i),number(a),number(b),number(h)]+([str(bool(flag)).lower()] if quality else [])+[number(c[k]) for c in cols])
+          for k,(i,a,b,h,flag) in enumerate(zip(ids,x,y,height,ambiguous,strict=True)))
+    return table(header,rows)
+
+
+def pca_coordinates(fit,intervals,points,spacing,base):
+    """Candidate positions in the combined stem's PCA frame, mm.
+
+    Origin = centroid of the stem's top-% observations (fit['center']); u along the first principal
+    axis, oriented from the selected leaf base towards the other end (the sign is taken from the
+    curve's ends A→B, so it also holds for edited curves); v = left normal (ty,-tx) of u in the
+    y-down grid, so the left side is positive as for stem y. Straight axes: valid for any leaf shape,
+    but u is not arclength on a curved stem.
+    """
+    if base not in ('a','b'): raise ValueError('Leaf base must be a or b')
+    c=np.asarray(fit['coefficients'],float);axis=np.asarray(fit['axis'],float);axis=axis/np.linalg.norm(axis)
+    lo=min(a for a,b in intervals);hi=max(b for a,b in intervals)
+    ends=[np.array([np.polynomial.polynomial.polyval(t,c[:,k]) for k in range(2)]) for t in (lo,hi)]
+    if float((ends[1]-ends[0])@axis)<0: axis=-axis
+    if base=='b': axis=-axis
+    normal=np.array([axis[1],-axis[0]])
+    delta=np.asarray(points,float).reshape(-1,2)-np.asarray(fit['center'],float)
+    return delta@axis*spacing,delta@normal*spacing
+
+
+def global_coordinates(points,meta):
+    """Merged-grid (column,row) centres to stitched world mm: x right, y down (canvas/workspace frame)."""
+    p=np.asarray(points,float).reshape(-1,2)
+    return np.asarray(meta['origin_center_mm'][0])+p[:,0]*meta['spacing_mm'][0],np.asarray(meta['origin_center_mm'][1])+p[:,1]*meta['spacing_mm'][1]
+
+
+def outline_csv(rings_mm):
+    """rings_mm: list of flat [x,y,...] lists in world mm. Ring 1 is the largest; rings are closed (last→first)."""
+    rows=[]
+    for r,ring in enumerate(rings_mm,1):
+        a=np.asarray(ring,float).reshape(-1,2)
+        rows+=[[r,k,number(x),number(y)] for k,(x,y) in enumerate(a,1)]
+    return table(['ring','point','x_mm','y_mm'],rows)
 from stem_arc import StemArc
 from nearest_stem import nearest_points
 
@@ -120,7 +163,64 @@ def request(body):
             intervals=nearest_stem.curve_domain(sm['fit'],data['curve_xy'],data['segment_lengths'])
         connections=nearest_stem.request(dict(stem_key=sk,peaks_key=pm['key']))
         x,y,ambiguous=stem_coordinates(sm['fit'],intervals,points,mm['spacing_mm'][0],base,connections['targets_'+base],connections['parameters_'+base])
-        text=candidate_csv(range(1,len(points)+1),x,y,heights,ambiguous,quality);count=len(points)
+        u,v=pca_coordinates(sm['fit'],intervals,points,mm['spacing_mm'][0],base);gx,gy=global_coordinates(points,mm)
+        text=candidate_csv(range(1,len(points)+1),x,y,heights,ambiguous,quality,(u,v,gx,gy));count=len(points)
         data=dict(id=list(range(1,count+1)),x=x.tolist(),y=y.tolist(),height=heights.tolist(),side_ambiguous=ambiguous.tolist())
     else: raise ValueError('Unknown export kind')
     return dict(count=count,base=base,units='mm',data=data) if body.get('plot') else dict(filename=name,csv=text,count=count,base=base,units='mm')
+
+
+def outline_request(body):
+    """Leaf outline CSV in stitched world mm: the edited outline when outline_key is given, else the original."""
+    import json
+    import engine
+    import outline
+    name=filename(body.get('filename'))
+    key=body.get('merge_key');okey=outline.optional_key(body.get('outline_key'))
+    orig=outline.original(dict(merge_key=key))  # validates the merge
+    if okey:
+        meta=json.loads((engine.CACHE/'outlines'/okey/'meta.json').read_text())
+        if meta['kind']!='edited' or meta['merge_key']!=key: raise ValueError('Edited outline belongs to another merge')
+        rings=meta['rings_mm']
+    else:
+        r=orig['spacing_mm'];o=orig['origin_center_mm']
+        rings=[(np.asarray(a,float).reshape(-1,2)*np.asarray(r)+np.asarray(o)).ravel().tolist() for a in orig['rings']]
+    return dict(filename=name,csv=outline_csv(rings),rings=len(rings),points=sum(len(a)//2 for a in rings),edited=bool(okey),units='mm')
+
+
+def heightmap_tiff(z,meta):
+    """Float32 ImageJ TIFF of merged raw heights (mm, NaN = no data) with mm pixel calibration.
+
+    ImageJ origin is in pixels: world_mm = (pixel - origin_px) * pixel_mm, matching
+    world = origin_center_mm + (column,row) * spacing_mm. JSON 'Info' repeats the georeference.
+    """
+    import tifffile
+    import json
+    r=meta['spacing_mm'];o=meta['origin_center_mm']
+    valid=np.isfinite(z);lo=float(np.nanmin(z)) if valid.any() else 0.;hi=float(np.nanmax(z)) if valid.any() else 0.
+    info=dict(content='stitched merged raw height (maximum of finite source heights within prepared masks)',
+              height_units='mm (raw TMD, not levelled)',no_data='NaN',pixel_mm=[r[0],r[1]],
+              origin_center_mm=list(o),coordinates='world_x_mm = origin_center_mm[0] + column * pixel_mm[0]; world_y_mm = origin_center_mm[1] + row * pixel_mm[1] (y down); same frame as trichome global_x_mm/global_y_mm and leaf-outline x_mm/y_mm',
+              dimensions=[int(z.shape[1]),int(z.shape[0])],height_range_mm=[lo,hi],valid_cells=int(valid.sum()),
+              sources=[engine_name(s['path']) for s in meta.get('sources',[])])
+    out=io.BytesIO()
+    tifffile.imwrite(out,np.ascontiguousarray(z,np.float32),imagej=True,resolution=(1/r[0],1/r[1]),compression='zlib',
+                     metadata=dict(unit='mm',xorigin=-o[0]/r[0],yorigin=-o[1]/r[1],min=lo,max=hi,Info=json.dumps(info)))
+    return out.getvalue(),info
+
+
+def engine_name(path):
+    return str(path).replace('\\','/').rstrip('/').rsplit('/',1)[-1]  # folder name only; no local paths in exports
+
+
+def heightmap_request(body):
+    import json
+    import engine
+    import merge
+    name=filename(body.get('filename'),'.tif')
+    key=body.get('merge_key')
+    if not isinstance(key,str) or key not in merge.MERGES: raise ValueError('Current registered merge required; Merge again')
+    meta=json.loads((engine.CACHE/'merges'/key/'meta.json').read_text())
+    with np.load(engine.CACHE/'merges'/key/'raw.npz',allow_pickle=False) as data: z=data['height_mm']
+    raw,info=heightmap_tiff(z,meta)
+    return name,raw,info

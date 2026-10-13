@@ -32,7 +32,7 @@ summary{min-height:28px;padding:5px 0}
 button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #ff0088;outline-offset:2px}
 label:has(input[type=checkbox]){min-height:24px;align-content:center}
 #computeStem,#computeCandidates,#computeBorders,#merge{width:100%;min-height:36px;margin-top:6px}
-#exportStep input,#exportStep button{width:100%;min-height:36px}
+#exportStep input,#exportStep button,#exportKind{width:100%;min-height:36px}
 #exportStep button{margin:6px 0 10px;border-color:#fff}
 .exportName{display:block;margin:10px 0 5px;color:#ddd}
 #exportStatus{color:#fff;overflow-wrap:anywhere}

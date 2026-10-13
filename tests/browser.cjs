@@ -29,13 +29,16 @@ try{
  if(process.env.SMALL_FIXTURE){await p.locator('#medianWindow').fill('11');await p.locator('#peakWindow').fill('5');}
  await p.locator('#computeCandidates').click();await p.waitForFunction(()=>window.postDebug().peaksCurrent&&!window.postDebug().busy);
  await p.locator('#computeBorders').click();await p.waitForFunction(()=>window.postDebug().bordersCurrent&&!window.postDebug().busy);
+ const pick=async(kind,file)=>{await p.locator('#exportKind').selectOption(kind);await p.waitForFunction(()=>!document.getElementById('downloadExport').disabled);const got=p.waitForEvent('download');await p.locator('#downloadExport').click();const d=await got;await d.saveAs(path.join(out,file));assert(!await d.failure());return fs.readFileSync(path.join(out,file));};
  for(const base of ['a','b']){
   await p.locator('#leafBase').selectOption(base);await p.locator('#previewPlot').click();await p.waitForFunction(b=>window.stemPlotDebug().ready&&window.stemPlotDebug().base===b,base);
-  {const got=p.waitForEvent('download');await p.locator('#downloadArea').click();const file=await got;await file.saveAs(path.join(out,`leaf-area-${base}.csv`));assert(!await file.failure());assert(fs.readFileSync(path.join(out,`leaf-area-${base}.csv`),'utf8').includes('candidates_per_3d_area'));}
-  for(const [button,kind] of [['downloadBorders','borders'],['downloadTrichomes','trichomes']]){const got=p.waitForEvent('download');await p.locator('#'+button).click();const file=await got;await file.saveAs(path.join(out,`${kind}-${base}.csv`));assert(!await file.failure());}
+  assert((await pick('area',`leaf-area-${base}.csv`)).toString().includes('candidates_per_3d_area'));
+  {const t=(await pick('trichomes',`trichomes-${base}.csv`)).toString();assert(t.startsWith('id,x_mm,y_mm,height_mm,side_ambiguous,pca_u_mm,pca_v_mm,global_x_mm,global_y_mm'));}
+  await pick('borders',`borders-${base}.csv`);
   fs.writeFileSync(path.join(out,`plot-${base}.json`),JSON.stringify(await p.evaluate(()=>window.stemPlotDebug())));
  }
- checks.push('candidates, borders, both-base plot and actual CSV downloads');
+ assert((await pick('outline','leaf-outline.csv')).toString().startsWith('ring,point,x_mm,y_mm'));{const tif=await pick('heightmap','heightmap.tif');assert(tif.length>1000&&tif.slice(0,2).toString()==='II');}
+ checks.push('candidates, borders, both-base plot and actual CSV/TIFF downloads (trichomes with stem/PCA/global, outline, height map)');
  await p.locator('aside').evaluate(e=>e.scrollTop=0);await p.screenshot({path:path.join(out,'workflow-1280.png')});
  fs.writeFileSync(path.join(out,'state.json'),JSON.stringify(await p.evaluate(()=>({slice:window.stitcherDebug(),post:window.postDebug()}))));
  assert.equal(await p.locator('#error').textContent(),'');assert.deepEqual(errors,[]);
